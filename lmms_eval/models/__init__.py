@@ -135,6 +135,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "llava_onevision1_5": "Llava_OneVision1_5",
     "llava_onevision2": "Llava_OneVision2",
     "vgent": "VGentModel",
+    "dvd": "DVDModel",
 }
 
 MODEL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -144,6 +145,7 @@ MODEL_ALIASES: dict[str, tuple[str, ...]] = {
     "async_hf_model": ("async_hf",),
     "litellm": ("litellm_chat", "litellm_compatible"),
     "vgent": ("vgent_vllm", "vgent_model"),
+    "dvd": ("deep_video_discovery",),
 }
 
 
