@@ -161,6 +161,8 @@ class DVDModel(AsyncOpenAIChat):
         dvd_clip_secs: int = 10,
         dvd_video_fps: float = 2.0,
         dvd_global_browse_topk: int = 300,
+        dvd_host: str = "127.0.0.1",
+        dvd_port: int = 9002,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -213,6 +215,8 @@ class DVDModel(AsyncOpenAIChat):
             global_browse_topk=dvd_global_browse_topk,
             dvd_db_dir=self.dvd_db_dir,
             dvd_venv_python=resolved_venv_python,
+            dvd_host=dvd_host,
+            dvd_port=int(dvd_port),
         )
 
         os.makedirs(self.dvd_db_dir, exist_ok=True)
