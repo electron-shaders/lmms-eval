@@ -21,14 +21,13 @@ from __future__ import annotations
 
 import os
 import sys
+from multiprocessing import cpu_count
 from typing import Optional
-
-from loguru import logger as eval_logger
 
 from lmms_eval.api.instance import Instance, TokenCounts
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.async_openai import AsyncOpenAIChat
-
+from loguru import logger as eval_logger
 
 # ---------------------------------------------------------------------------
 # Lazy DVD import helper
@@ -163,8 +162,11 @@ class DVDModel(AsyncOpenAIChat):
         dvd_global_browse_topk: int = 300,
         dvd_host: str = "127.0.0.1",
         dvd_port: int = 9002,
+        batch_size: int = 1,
         **kwargs,
     ):
+        if "num_cpus" not in kwargs:
+            kwargs["num_cpus"] = min(cpu_count(), int(batch_size))
         super().__init__(**kwargs)
 
         self.dvd_db_dir = dvd_db_dir or os.environ.get("DVD_DB_DIR", "./.dvd_dbs")
