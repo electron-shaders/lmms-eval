@@ -19,16 +19,13 @@ Environment variables
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
-import threading
-import types
 from typing import Optional
 
 from loguru import logger as eval_logger
 
-from lmms_eval.api.instance import Instance
+from lmms_eval.api.instance import Instance, TokenCounts
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.async_openai import AsyncOpenAIChat
 
@@ -232,9 +229,15 @@ class DVDModel(AsyncOpenAIChat):
     async def maybe_forward_with_tool(self, request: Instance, idx: int):
         """
         1. Extract the video path and question from the request.
-        2. Run the DVD agent (in a thread-pool executor so the event loop is free).
-        3. Replace the question in the original messages with the DVD answer.
-        4. Forward to the parent AsyncOpenAIChat for the final structured answer.
+        2. Run the DVD agent asynchronously.
+        3. Return the DVD answer directly — DVD's finish() call already
+           produces the final answer (e.g. "D"), so no second VLM round-trip
+           is needed.
+
+        Returns
+        -------
+        (content, idx, TokenCounts) matching the contract expected by the
+        parent's generate_until loop.
         """
         ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.args
         doc = self.task_dict[task][split][doc_id]
@@ -247,7 +250,7 @@ class DVDModel(AsyncOpenAIChat):
         )
         question = _extract_user_text(raw_messages)
 
-        # Run DVD agent
+        # Run DVD agent — returns the final answer string directly
         dvd_answer = await self._run_dvd_for_sample(
             video_path,
             question,
@@ -259,34 +262,9 @@ class DVDModel(AsyncOpenAIChat):
             f"dvd_answer={dvd_answer[:120]!r}"
         )
 
-        # Build a text-only message list containing just the DVD answer so
-        # the parent class can apply its standard response_format / sampling.
-        augmented_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Based on the following video analysis:\n\n{dvd_answer}\n\n"
-                            f"Answer the question concisely: {question}"
-                        ),
-                    }
-                ],
-            }
-        ]
-
-        patched_request = types.SimpleNamespace(
-            args=(
-                ctx,
-                lambda _doc, _msgs=augmented_messages: _msgs,
-                gen_kwargs,
-                doc_id,
-                task,
-                split,
-            )
-        )
-        return await super().maybe_forward_with_tool(patched_request, idx)
+        # DVD's finish() already contains the final answer — return it directly
+        # without an extra VLM call.
+        return dvd_answer, idx, TokenCounts()
 
     async def _run_dvd_for_sample(
         self,
@@ -322,4 +300,8 @@ class DVDModel(AsyncOpenAIChat):
             eval_logger.error(f"[DVD] run_dvd_query failed: {exc}")
             answer = ""
 
+        eval_logger.debug(
+            f"[DVD] run_dvd_query finished for video={video_path!r} "
+            f"question={question!r} answer={answer[:120]!r}"
+        )
         return answer or ""
