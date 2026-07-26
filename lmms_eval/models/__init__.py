@@ -148,7 +148,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "longvila": "LongVila",
     "llava_onevision1_5": "Llava_OneVision1_5",
     "llava_onevision2": "Llava_OneVision2",
-    "vgent": "VGentModel",
+    "vgent": "VgentModel",
     "dvd": "DVDModel",
 }
 
