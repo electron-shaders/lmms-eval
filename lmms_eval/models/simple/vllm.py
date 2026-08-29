@@ -12,7 +12,7 @@ from decord import VideoReader, cpu
 from loguru import logger as eval_logger
 from PIL import Image
 
-from lmms_eval.api.instance import Instance
+from lmms_eval.api.instance import GenerationResult, Instance, TokenCounts
 from lmms_eval.api.model import lmms
 from lmms_eval.api.registry import register_model
 from lmms_eval.imports import optional_import
@@ -459,7 +459,7 @@ class VLLM(lmms):
                 new_list.append(i)
         return new_list
 
-    def generate_until(self, requests) -> List[str]:
+    def generate_until(self, requests) -> List[GenerationResult]:
         res = []
         pbar = make_progress(total=len(requests), disable=(self.rank != 0), desc="Model Responding")
 
@@ -468,16 +468,18 @@ class VLLM(lmms):
         for batch_idx, batch_requests in enumerate(batched_requests):
             self._write_watchdog_heartbeat("encode_start", batch_idx=batch_idx, batch_requests=batch_requests)
             try:
-                batched_messages = []
+                batched_inputs = []
                 for idx in range(len(batch_requests)):
                     contexts, gen_kwargs, doc_to_visual, doc_id, task, split = batch_requests[idx].arguments
                     gen_kwargs = dict(gen_kwargs or {})
                     gen_kwargs["max_new_tokens"] = self._select_max_new_tokens(gen_kwargs.get("max_new_tokens"))
                     gen_kwargs.setdefault("temperature", 0)
                     gen_kwargs.setdefault("top_p", 0.95)
-                    sampling_params = SamplingParams(**self._build_sampling_params_dict(gen_kwargs))
+                    sampling_params_dict = self._build_sampling_params_dict(gen_kwargs)
 
                     visuals = [doc_to_visual(self.task_dict[task][split][doc_id])]
+                    decoded_frames = 0
+                    saw_video = False
                     if None in visuals:
                         visuals = []
                         imgs = []
@@ -488,14 +490,18 @@ class VLLM(lmms):
                         with ThreadPoolExecutor(max_workers=WORKERS) as executor:
                             for visual in visuals:
                                 if isinstance(visual, str) and (".mp4" in visual or ".avi" in visual or ".mov" in visual or ".flv" in visual or ".wmv" in visual):
-                                    all_tasks.append(executor.submit(self.encode_video, visual))
+                                    all_tasks.append(("video", executor.submit(self.encode_video, visual)))
                                 elif isinstance(visual, str) and (".jpg" in visual or ".jpeg" in visual or ".png" in visual or ".gif" in visual or ".bmp" in visual or ".tiff" in visual or ".webp" in visual):
-                                    all_tasks.append(executor.submit(self.encode_image, visual))
+                                    all_tasks.append(("image", executor.submit(self.encode_image, visual)))
                                 elif isinstance(visual, Image.Image):
-                                    all_tasks.append(executor.submit(self.encode_image, visual))
+                                    all_tasks.append(("image", executor.submit(self.encode_image, visual)))
 
-                            for task in all_tasks:
-                                imgs.append(task.result())
+                            for media_kind, media_task in all_tasks:
+                                encoded = media_task.result()
+                                imgs.append(encoded)
+                                if media_kind == "video":
+                                    saw_video = True
+                                    decoded_frames += len(encoded)
 
                     messages = [{"role": "user", "content": []}]
                     if self.image_first:
@@ -516,9 +522,18 @@ class VLLM(lmms):
                                     "image_url": {"url": f"data:image/png;base64,{img}"},
                                 }
                             )
-                    batched_messages.append(messages)
+                    batched_inputs.append(
+                        {
+                            "messages": messages,
+                            "sampling_params": sampling_params_dict,
+                            "workload": {
+                                "decoded_frames": decoded_frames if saw_video else None,
+                                "visual_inputs": len(self.flatten(imgs)),
+                                "llm_calls": 1,
+                            },
+                        }
+                    )
 
-                sampling_params = SamplingParams(**params)
                 self._write_watchdog_heartbeat("chat_start", batch_idx=batch_idx, batch_requests=batch_requests)
 
                 # NOTE:
@@ -526,22 +541,53 @@ class VLLM(lmms):
                 # - vllm chat method: https://docs.vllm.ai/en/stable/models/generative_models.html#llmchat
                 # The logic here is similar to the vllm implementation as shown here (https://docs.vllm.ai/en/stable/models/generative_models.html#llmchat)
                 # - vllm implementation: https://github.com/vllm-project/vllm/blob/d97841078b6e0dde8da36d5a2b8e8857a2c37944/vllm/entrypoints/chat_utils.py#L829
-                def _run_chat(inputs: list[Any]) -> list[str]:
+                def _run_chat(inputs: list[Any]) -> list[GenerationResult]:
+                    messages = [item["messages"] for item in inputs]
+                    sampling_params = [SamplingParams(**item["sampling_params"]) for item in inputs]
+                    started_at = time.perf_counter()
                     if self.chat_template is not None:
                         response = self.client.chat(
                             sampling_params=sampling_params,
-                            messages=inputs,
+                            messages=messages,
                             chat_template=self.chat_template,
                         )
                     else:
-                        response = self.client.chat(sampling_params=sampling_params, messages=inputs)
-                    return [o.outputs[0].text for o in response]
+                        response = self.client.chat(sampling_params=sampling_params, messages=messages)
+                    batch_latency = time.perf_counter() - started_at
+                    generated: list[GenerationResult] = []
+                    for output, item in zip(response, inputs):
+                        candidate = output.outputs[0]
+                        prompt_ids = getattr(output, "prompt_token_ids", None)
+                        output_ids = getattr(candidate, "token_ids", None)
+                        input_tokens = len(prompt_ids) if prompt_ids is not None else None
+                        output_tokens = len(output_ids) if output_ids is not None else None
+                        workload = dict(item["workload"])
+                        workload["latency_s"] = batch_latency
+                        request_metrics = getattr(output, "metrics", None)
+                        arrival = getattr(request_metrics, "arrival_time", None)
+                        first_token = getattr(request_metrics, "first_token_time", None)
+                        finished = getattr(request_metrics, "finished_time", None)
+                        if arrival is not None and first_token is not None:
+                            workload["ttft_s"] = max(0.0, float(first_token) - float(arrival))
+                        if first_token is not None and finished is not None and output_tokens and output_tokens > 1:
+                            workload["tpot_s"] = max(0.0, float(finished) - float(first_token)) / (output_tokens - 1)
+                        generated.append(
+                            GenerationResult(
+                                text=candidate.text,
+                                token_counts=TokenCounts(
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                ),
+                                workload=workload,
+                            )
+                        )
+                    return generated
 
-                response_text = self._run_tp_synced(batched_messages, _run_chat)
+                response_results = self._run_tp_synced(batched_inputs, _run_chat)
                 self._write_watchdog_heartbeat("chat_done", batch_idx=batch_idx, batch_requests=batch_requests)
 
-                assert len(response_text) == len(batch_requests)
-                res.extend(response_text)
+                assert len(response_results) == len(batch_requests)
+                res.extend(response_results)
                 pbar.update(len(batch_requests))
                 self._write_watchdog_heartbeat("batch_done", batch_idx=batch_idx, batch_requests=batch_requests)
             except Exception:

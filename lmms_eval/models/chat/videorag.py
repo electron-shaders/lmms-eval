@@ -23,7 +23,7 @@ import os
 import sys
 from typing import Optional
 
-from lmms_eval.api.instance import Instance, TokenCounts
+from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.async_openai import AsyncOpenAIChat
 from loguru import logger as eval_logger
@@ -251,7 +251,7 @@ class VideoRAGModel(AsyncOpenAIChat):
 
         Returns
         -------
-        (content, idx, TokenCounts) matching the contract expected by the
+        (content, idx, token counts) matching the contract expected by the
         parent's generate_until loop.
         """
         ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.args
@@ -277,4 +277,6 @@ class VideoRAGModel(AsyncOpenAIChat):
             f"answer={str(videorag_answer)[:120]!r}"
         )
 
-        return videorag_answer, idx, TokenCounts()
+        # VideoRAG does not expose per-query usage across its internal calls.
+        # Aggregate service usage is captured from the vLLM endpoints.
+        return videorag_answer, idx, None

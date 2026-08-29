@@ -24,7 +24,7 @@ import sys
 from multiprocessing import cpu_count
 from typing import Optional
 
-from lmms_eval.api.instance import Instance, TokenCounts
+from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.async_openai import AsyncOpenAIChat
 from loguru import logger as eval_logger
@@ -98,6 +98,29 @@ def _extract_user_text(raw_messages: list[dict]) -> str:
             parts = [c.get("text", "") for c in content if c.get("type") == "text"]
             return " ".join(parts)
     return ""
+
+
+def _resolve_srt_path(video_path: str) -> Optional[str]:
+    """Find an SRT associated with a local video.
+
+    In addition to the conventional same-directory layout, support datasets
+    such as Video-MME which store videos under ``data/`` and subtitles under
+    a sibling ``subtitle/`` directory.
+    """
+    video_dir = os.path.dirname(video_path)
+    dataset_dir = os.path.dirname(video_dir)
+    video_stem = os.path.splitext(os.path.basename(video_path))[0]
+    subtitle_name = f"{video_stem}.srt"
+
+    candidates = (
+        os.path.splitext(video_path)[0] + ".srt",
+        os.path.join(dataset_dir, "subtitle", subtitle_name),
+        os.path.join(dataset_dir, "subtitles", subtitle_name),
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +265,7 @@ class DVDModel(AsyncOpenAIChat):
 
         Returns
         -------
-        (content, idx, TokenCounts) matching the contract expected by the
+        (content, idx, token counts) matching the contract expected by the
         parent's generate_until loop.
         """
         ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.args
@@ -270,7 +293,9 @@ class DVDModel(AsyncOpenAIChat):
 
         # DVD's finish() already contains the final answer — return it directly
         # without an extra VLM call.
-        return dvd_answer, idx, TokenCounts()
+        # DVD's agent does not expose a single response usage object. Service
+        # totals are captured from the VLM and embedding /metrics endpoints.
+        return dvd_answer, idx, None
 
     async def _run_dvd_for_sample(
         self,
@@ -288,10 +313,13 @@ class DVDModel(AsyncOpenAIChat):
             )
             return ""
 
-        # Locate SRT subtitle alongside the video file if it exists
-        srt_path = os.path.splitext(video_path)[0] + ".srt"
-        if not os.path.isfile(srt_path):
-            srt_path = None
+        srt_path = _resolve_srt_path(video_path)
+        if self.dvd_lite_mode and srt_path is None:
+            eval_logger.error(
+                f"[DVD] Lite mode requires an SRT subtitle, but none was found "
+                f"for video {video_path!r}."
+            )
+            return ""
 
         try:
             answer = await _run_dvd_query(

@@ -31,7 +31,7 @@ import asyncio
 import os
 import sys
 
-from lmms_eval.api.instance import Instance, TokenCounts
+from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.async_openai import AsyncOpenAIChat
 from loguru import logger as eval_logger
@@ -314,4 +314,6 @@ class VgentModel(AsyncOpenAIChat):
             None, self._run_vgent_query, raw_messages, task, doc
         )
 
-        return response, idx, TokenCounts()
+        # Vgent performs its own multi-call workflow and returns no per-request
+        # usage object. Aggregate calls/tokens are captured from vLLM /metrics.
+        return response, idx, None

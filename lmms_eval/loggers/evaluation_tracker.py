@@ -196,6 +196,11 @@ class EvaluationTracker:
                 # update initial results dict
                 results.update({"task_hashes": task_hashes})
                 results.update(asdict(self.general_config_tracker))
+                from lmms_eval.models.model_utils.experiment_metrics import resource_metrics_link
+
+                metrics_link = resource_metrics_link()
+                if metrics_link is not None:
+                    results["resource_metrics"] = metrics_link
                 dumped = json.dumps(
                     results,
                     indent=2,
@@ -210,6 +215,9 @@ class EvaluationTracker:
                 self.date_id = datetime_str.replace(":", "-")
                 file_results_aggregated = path.joinpath(f"{self.date_id}_results.json")
                 file_results_aggregated.open("w", encoding="utf-8").write(dumped)
+                from lmms_eval.models.model_utils.experiment_metrics import record_result_path
+
+                record_result_path(file_results_aggregated)
 
                 if self.api and self.push_results_to_hub:
                     repo_id = self.results_repo if self.public_repo else self.results_repo_private

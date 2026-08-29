@@ -26,7 +26,7 @@ import lmms_eval.api
 import lmms_eval.api.metrics
 import lmms_eval.api.registry
 from lmms_eval import models
-from lmms_eval.api.instance import Instance, unwrap_generation_output
+from lmms_eval.api.instance import GenerationResult, Instance, unwrap_generation_output
 from lmms_eval.api.model import lmms
 from lmms_eval.api.reasoning import parse_reasoning_tags_config, strip_reasoning_tags
 from lmms_eval.api.task import Task
@@ -50,7 +50,15 @@ from lmms_eval.evaluator_utils import (
 from lmms_eval.llm_judge.launcher import get_launcher
 from lmms_eval.loggers.evaluation_tracker import EvaluationTracker
 from lmms_eval.models.model_utils.efficiency_metrics import build_efficiency_summary
+from lmms_eval.models.model_utils.experiment_metrics import (
+    aggregate_workload_metrics,
+    log_workload,
+    mark_phase,
+    reset_workload_metrics,
+    summarize_workload_metrics,
+)
 from lmms_eval.models.model_utils.usage_metrics import (
+    aggregate_usage_metrics,
     is_budget_exceeded,
     reset_usage_metrics,
     set_budget,
@@ -109,6 +117,7 @@ def _clone_padding_request(pad_source: Instance) -> Instance:
     pad_instance.metadata["__padding_only__"] = True
     pad_instance.resps = []
     pad_instance.token_counts = []
+    pad_instance.workloads = []
     return pad_instance
 
 
@@ -499,6 +508,7 @@ def simple_evaluate(
 
     reset_logged_metrics()
     reset_usage_metrics()
+    reset_workload_metrics()
     if max_tokens is not None:
         set_budget(max_tokens=max_tokens)
 
@@ -519,6 +529,7 @@ def simple_evaluate(
         )
 
     eval_succeeded = False
+    mark_phase("evaluation")
     try:
         results = evaluate(
             lm=lm,
@@ -547,6 +558,8 @@ def simple_evaluate(
                 dist_backend=distributed_executor_backend,
                 accelerator=getattr(lm, "accelerator", None),
             )
+    usage_summary = aggregate_usage_metrics(summarize_usage_metrics())
+    workload_summary = aggregate_workload_metrics(summarize_workload_metrics())
     if global_rank == 0:
         from lmms_eval.models.model_utils.gen_metrics import summarize_logged_metrics
 
@@ -603,8 +616,8 @@ def simple_evaluate(
         throughput_summary = summarize_logged_metrics()
         if throughput_summary:
             results["throughput"] = throughput_summary
-        usage_summary = summarize_usage_metrics()
         results["usage"] = usage_summary
+        results["workload"] = workload_summary
         efficiency_summary = build_efficiency_summary(results)
         if efficiency_summary:
             results["efficiency"] = efficiency_summary
@@ -1089,8 +1102,17 @@ def evaluate(
 
         for x, req in zip(resps, cloned_reqs):
             text, tc = unwrap_generation_output(x)
+            workload = x.workload if isinstance(x, GenerationResult) else None
             req.resps.append(text)
             req.token_counts.append(tc)
+            req.workloads.append(workload)
+            if not req.metadata.get("__padding_only__"):
+                log_workload(
+                    task_name=req.task_name,
+                    doc_id=req.doc_id,
+                    workload=workload,
+                    token_counts=tc,
+                )
 
         if is_budget_exceeded():
             eval_logger.warning("Token budget reached after '{}' requests. Skipping remaining request types.", reqtype)
@@ -1267,12 +1289,14 @@ def evaluate(
                     input_media = _collect_input_media(doc, filtered_arguments)
 
                     per_sample_tc = []
+                    per_sample_workloads = []
                     for req in requests:
                         if req.token_counts:
                             tc = req.token_counts[0]
                             per_sample_tc.append(tc.to_dict() if tc is not None else None)
                         else:
                             per_sample_tc.append(None)
+                        per_sample_workloads.append(req.workloads[0] if req.workloads else None)
 
                     example = {
                         "doc_id": doc_id,
@@ -1282,6 +1306,7 @@ def evaluate(
                         "resps": [req.raw_filtered_resps.get(filter_key, req.resps) for req in requests],
                         "filtered_resps": [req.filtered_resps[filter_key] for req in requests],
                         "token_counts": per_sample_tc,
+                        "workload": per_sample_workloads,
                         "doc_hash": hash_string(
                             json.dumps(
                                 requests[0].doc,

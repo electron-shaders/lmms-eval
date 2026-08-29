@@ -351,7 +351,7 @@ class AsyncOpenAIChat(lmms):
 
             async def _process(req, idx):
                 if is_budget_exceeded():
-                    return "[LMMS_EVAL_BUDGET_EXCEEDED]", idx, TokenCounts(), True, False, 0.0
+                    return "[LMMS_EVAL_BUDGET_EXCEEDED]", idx, None, True, False, 0.0
                 started_at = time.time()
                 rate_limited = False
                 last_error_msg = "unknown error"
@@ -373,7 +373,7 @@ class AsyncOpenAIChat(lmms):
                 elapsed = time.time() - started_at
                 error_preview = last_error_msg.replace("\n", " ")[:200]
                 failure_content = f"[LMMS_EVAL_REQUEST_FAILED after {self.max_retries} retries] {error_preview}"
-                return failure_content, idx, TokenCounts(), False, rate_limited, elapsed
+                return failure_content, idx, None, False, rate_limited, elapsed
 
             failed_requests = 0
             rate_limited_requests = 0
@@ -441,7 +441,16 @@ class AsyncOpenAIChat(lmms):
                         rate_limited,
                         elapsed,
                     ) = task.result()
-                    res.append((GenerationResult(text=content, token_counts=token_counts), request_idx))
+                    res.append(
+                        (
+                            GenerationResult(
+                                text=content,
+                                token_counts=token_counts,
+                                workload={"latency_s": elapsed},
+                            ),
+                            request_idx,
+                        )
+                    )
                     if not success:
                         failed_requests += 1
                     if rate_limited:

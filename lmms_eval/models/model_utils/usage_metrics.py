@@ -204,6 +204,50 @@ def summarize_usage_metrics() -> Dict[str, Any]:
     }
 
 
+def aggregate_usage_metrics(local_summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Sum rank-local usage summaries across an initialized process group."""
+    try:
+        import torch.distributed as dist
+    except ImportError:
+        return local_summary
+
+    if not dist.is_available() or not dist.is_initialized():
+        return local_summary
+
+    gathered: List[Optional[Dict[str, Any]]] = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, local_summary)
+
+    counter_keys = ("input_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "n_api_calls")
+
+    def merge_counter_group(summaries: List[Dict[str, Any]], key: str) -> Dict[str, Any]:
+        merged: Dict[str, Dict[str, int]] = {}
+        group_names = set()
+        for summary in summaries:
+            group_names.update((summary.get(key) or {}).keys())
+        for group_name in sorted(group_names):
+            merged[group_name] = {
+                counter: sum(int(((summary.get(key) or {}).get(group_name) or {}).get(counter, 0)) for summary in summaries)
+                for counter in counter_keys
+            }
+        return merged
+
+    summaries = [summary for summary in gathered if summary]
+    if not summaries:
+        return {}
+    total = {
+        counter: sum(int((summary.get("total") or {}).get(counter, 0)) for summary in summaries)
+        for counter in counter_keys
+    }
+    budgets = [summary.get("budget_total_tokens") for summary in summaries if summary.get("budget_total_tokens") is not None]
+    return {
+        "total": total,
+        "by_task": merge_counter_group(summaries, "by_task"),
+        "by_source": merge_counter_group(summaries, "by_source"),
+        "budget_exceeded": any(bool(summary.get("budget_exceeded")) for summary in summaries),
+        "budget_total_tokens": budgets[0] if budgets else None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
