@@ -219,7 +219,23 @@ def _load_legacy_adapter(code_path: Path):
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-    return module.Videoxl2
+
+    legacy_class = module.Videoxl2
+    if "generate_until_multi_round" in getattr(legacy_class, "__abstractmethods__", ()):
+        # The bundled Video-XL-2 evaluator predates the multi-round method on
+        # lmms. Because it imports the already-loaded modern lmms base class,
+        # Python otherwise considers the legacy adapter abstract and refuses
+        # to instantiate it. Keep the compatibility behavior local to this
+        # integration rather than modifying the external checkout.
+        class CompatibleVideoxl2(legacy_class):
+            def generate_until_multi_round(self, requests):
+                raise NotImplementedError("Video-XL-2 does not support multi-round generation")
+
+        CompatibleVideoxl2.__name__ = legacy_class.__name__
+        CompatibleVideoxl2.__qualname__ = legacy_class.__qualname__
+        legacy_class = CompatibleVideoxl2
+
+    return legacy_class
 
 
 def _count_selected_units(value: Any) -> int:
