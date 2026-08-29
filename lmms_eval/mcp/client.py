@@ -1,35 +1,88 @@
 import asyncio
+import sys
+from contextlib import AsyncExitStack
 from datetime import timedelta
-from typing import List, Union
+from typing import List, Optional, Union
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import AudioContent, ImageContent, TextContent
 
 
+def _tool_input_schema(tool):
+    """Read tool schemas from MCP v1 (camelCase) or v2 (snake_case)."""
+    input_schema = getattr(tool, "inputSchema", None)
+    if input_schema is None:
+        input_schema = tool.input_schema
+    return input_schema
+
+
 class MCPClient:
-    def __init__(self, server_path: str, timeout: timedelta = timedelta(seconds=600)):
+    def __init__(self, server_path: str, timeout: float | timedelta = 600.0):
         """
         Initialize the MCPClient with the path to the MCP server.
         """
         self.server_path = server_path
-        self.timeout = timeout
+        self.timeout = timeout.total_seconds() if isinstance(timeout, timedelta) else float(timeout)
+        self._session: Optional[ClientSession] = None
+        self._exit_stack: Optional[AsyncExitStack] = None
+        self._connection_lock = asyncio.Lock()
+
+    def _server_params(self) -> StdioServerParameters:
+        # A bare ``python`` can resolve outside the evaluator's virtual
+        # environment when the launcher invokes the venv interpreter by its
+        # absolute path without activating it first.
+        return StdioServerParameters(command=sys.executable, args=[self.server_path])
+
+    async def connect(self) -> ClientSession:
+        """Start one MCP subprocess and retain its session until ``close``."""
+        if self._session is not None:
+            return self._session
+
+        async with self._connection_lock:
+            if self._session is not None:
+                return self._session
+
+            stack = AsyncExitStack()
+            try:
+                read_stream, write_stream = await stack.enter_async_context(stdio_client(server=self._server_params()))
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream, read_timeout_seconds=self.timeout))
+                await session.initialize()
+            except BaseException:
+                await stack.aclose()
+                raise
+
+            self._exit_stack = stack
+            self._session = session
+            return session
+
+    async def close(self) -> None:
+        """Close the persistent MCP session and terminate its subprocess."""
+        async with self._connection_lock:
+            stack = self._exit_stack
+            self._session = None
+            self._exit_stack = None
+            if stack is not None:
+                await stack.aclose()
+
+    async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        await self.close()
 
     async def get_function_list(self):
         """
         Connect to the MCP server and retrieve the list of available functions.
         """
-        server_params = StdioServerParameters(command="python", args=[self.server_path])
-        async with stdio_client(server=server_params) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream, read_timeout_seconds=self.timeout) as session:
-                await session.initialize()
+        session = await self.connect()
+        tools = (await session.list_tools()).tools
 
-                tools = (await session.list_tools()).tools
-
-                functions = []
-                for tool in tools:
-                    functions.append({"type": "function", "function": {"name": tool.name, "description": tool.description or "", "parameters": tool.inputSchema}})
-                return functions
+        functions = []
+        for tool in tools:
+            functions.append({"type": "function", "function": {"name": tool.name, "description": tool.description or "", "parameters": _tool_input_schema(tool)}})
+        return functions
 
     async def run_tool(self, tool_name: str, tool_args: dict):
         """
@@ -38,13 +91,8 @@ class MCPClient:
         :param tool_args: Arguments for the tool.
         :return: Result of the tool execution.
         """
-        server_params = StdioServerParameters(command="python", args=[self.server_path])
-        async with stdio_client(server=server_params) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream, read_timeout_seconds=self.timeout) as session:
-                await session.initialize()
-
-                result = await session.call_tool(tool_name, tool_args)
-                return result
+        session = await self.connect()
+        return await session.call_tool(tool_name, tool_args)
 
     def convert_result_to_openai_format(self, result: Union[ImageContent, TextContent, AudioContent, List[Union[ImageContent, TextContent, AudioContent]]]) -> dict:
         """
@@ -74,8 +122,13 @@ class MCPClient:
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        async def run():
+            async with self:
+                return await self.get_function_list()
+
         try:
-            return loop.run_until_complete(self.get_function_list())
+            return loop.run_until_complete(run())
         finally:
             loop.close()
 
@@ -89,7 +142,12 @@ class MCPClient:
         """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        async def run():
+            async with self:
+                return await self.run_tool(tool_name, tool_args)
+
         try:
-            return loop.run_until_complete(self.run_tool(tool_name, tool_args))
+            return loop.run_until_complete(run())
         finally:
             loop.close()

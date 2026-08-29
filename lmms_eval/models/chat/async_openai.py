@@ -38,6 +38,24 @@ cpu, _ = optional_import("decord", "cpu")
 load_dotenv(verbose=True)
 
 
+def _format_request_exception(exc: BaseException) -> str:
+    """Include leaf exceptions hidden by AnyIO/MCP ExceptionGroups."""
+    if isinstance(exc, BaseExceptionGroup):
+        leaves: list[str] = []
+
+        def collect(group: BaseExceptionGroup) -> None:
+            for nested in group.exceptions:
+                if isinstance(nested, BaseExceptionGroup):
+                    collect(nested)
+                else:
+                    leaves.append(f"{type(nested).__name__}: {nested}")
+
+        collect(exc)
+        if leaves:
+            return f"{type(exc).__name__}: {exc}; nested: {' | '.join(leaves)}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 @register_model("async_openai")
 class AsyncOpenAIChat(lmms):
     is_simple = False
@@ -116,9 +134,13 @@ class AsyncOpenAIChat(lmms):
             from lmms_eval.mcp import MCPClient
 
             self.mcp_client = MCPClient(mcp_server_path)
+            self._mcp_functions = None
+            self._mcp_functions_lock = asyncio.Lock()
             os.makedirs(self.work_dir, exist_ok=True)
         else:
             self.mcp_client = None
+            self._mcp_functions = None
+            self._mcp_functions_lock = None
 
         accelerator = Accelerator()
         # assert self.batch_size_per_gpu == 1, "Llava currently does not support batched generation. See https://github.com/haotian-liu/LLaVA/issues/754. HF Llava also has this issue."
@@ -227,7 +249,11 @@ class AsyncOpenAIChat(lmms):
 
         if self.mcp_client is not None:
             # get the function list from the MCP server
-            functions = await self.mcp_client.get_function_list()
+            if self._mcp_functions is None:
+                async with self._mcp_functions_lock:
+                    if self._mcp_functions is None:
+                        self._mcp_functions = await self.mcp_client.get_function_list()
+            functions = self._mcp_functions
             payload["tools"] = functions
             payload["tool_choice"] = "auto"  # or "auto" for automatic tool selection
 
@@ -324,7 +350,7 @@ class AsyncOpenAIChat(lmms):
     def generate_until(self, requests) -> List[GenerationResult]:
         results = []
 
-        async def run():
+        async def run_requests():
             res: List[Tuple[GenerationResult, int]] = []
             pbar = tqdm(total=len(requests), disable=(self.rank != 0), desc="Model Responding")
             current_concurrency = (
@@ -361,7 +387,7 @@ class AsyncOpenAIChat(lmms):
                         elapsed = time.time() - started_at
                         return content, original_idx, token_counts, True, rate_limited, elapsed
                     except Exception as exc:
-                        error_msg = str(exc)
+                        error_msg = _format_request_exception(exc)
                         last_error_msg = error_msg
                         rate_limited = rate_limited or is_rate_limit_error(error_msg)
                         eval_logger.info(f"Attempt {attempt + 1}/{self.max_retries} failed for request {idx} with error: {error_msg}")
@@ -466,6 +492,12 @@ class AsyncOpenAIChat(lmms):
 
             pbar.close()
             return res
+
+        async def run():
+            if self.mcp_client is None:
+                return await run_requests()
+            async with self.mcp_client:
+                return await run_requests()
 
         eval_results = asyncio.run(run())
         eval_results.sort(key=lambda x: x[1])  # Sort by index to restore original
