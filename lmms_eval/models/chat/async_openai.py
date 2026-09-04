@@ -72,6 +72,7 @@ class AsyncOpenAIChat(lmms):
         max_size_in_mb: int = 20,
         mcp_server_path: str = None,
         num_cpus: int = None,
+        batch_size: int = 1,
         work_dir: str = None,
         fps: Optional[int] = None,
         nframes: Optional[int] = 64,
@@ -101,6 +102,12 @@ class AsyncOpenAIChat(lmms):
         self.retry_backoff_s = max(0.0, float(1.0 if retry_backoff_s is None else retry_backoff_s))
         self.max_retries = max_retries
         self.max_size_in_mb = max_size_in_mb  # some models have a limit on the size of the image
+        try:
+            self.batch_size_per_gpu = int(batch_size)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}") from exc
+        if self.batch_size_per_gpu < 1:
+            raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
         if num_cpus is None:
             self.num_cpus = cpu_count() // 2
         else:

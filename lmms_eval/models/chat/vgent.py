@@ -43,6 +43,7 @@ from loguru import logger as eval_logger
 _vgent_loaded: bool = False
 _run_vgent_query = None        # callable(video_id, query, video_path, output_dir, question, candidates, doc, subtitle_path, model_name, task) -> str
 _init_vgent_instance = None    # callable(model_name, task, openai_client, model_version) -> None
+_shutdown_vgent_instance = None
 
 
 def _load_vgent(vgent_path: str | None) -> bool:
@@ -51,7 +52,7 @@ def _load_vgent(vgent_path: str | None) -> bool:
 
     Returns True if the query function was imported successfully.
     """
-    global _vgent_loaded, _run_vgent_query, _init_vgent_instance
+    global _vgent_loaded, _run_vgent_query, _init_vgent_instance, _shutdown_vgent_instance
 
     if _vgent_loaded:
         return _run_vgent_query is not None
@@ -72,6 +73,7 @@ def _load_vgent(vgent_path: str | None) -> bool:
 
         _run_vgent_query = _va.run_vgent_query
         _init_vgent_instance = _va.init_vgent_instance
+        _shutdown_vgent_instance = _va.shutdown_vgent_instance
         _vgent_loaded = True
         eval_logger.info("[Vgent] Imported run_vgent_query")
         return True
@@ -205,6 +207,18 @@ class VgentModel(AsyncOpenAIChat):
     ):
         super().__init__(**kwargs)
 
+        # For Vgent, BATCH_SIZE is the overall concurrent model API request budget.
+        self.num_cpus = self.batch_size_per_gpu
+        if self.adaptive_concurrency:
+            eval_logger.warning(
+                "[Vgent] adaptive_concurrency is disabled; --batch_size is the "
+                "sole concurrency limit."
+            )
+        self.adaptive_concurrency = False
+        # Vgent groups requests by video to share decoded frames and JIT graph
+        # work, so the base backend's prompt-prefix reordering must stay off.
+        self.prefix_aware_queue = False
+
         self.vgent_graph_dir = vgent_graph_dir or os.environ.get("VGENT_GRAPH_DIR", "")
         self.vgent_model_name = vgent_model_name or kwargs.get("model", self.model_version)
         self.vgent_model_id = VGENT_MODEL_ID.get(self.vgent_model_name, "lmms_eval_async_openai")
@@ -236,9 +250,45 @@ class VgentModel(AsyncOpenAIChat):
                 "custom",
                 openai_client=self.client,
                 openai_model_version=self.model_version,
+                batch_size=self.batch_size_per_gpu,
+                openai_timeout=self.timeout,
             )
 
         os.makedirs(self.vgent_graph_dir, exist_ok=True)
+
+    def generate_until(self, requests):
+        """Group questions by video while preserving result order."""
+        indexed_requests = list(enumerate(requests))
+
+        def video_group(item):
+            original_idx, request = item
+            try:
+                _, _, _, doc_id, task, split = request.args
+                doc = self.task_dict[task][split][doc_id]
+                video_id = _resolve_video_id(doc)
+                if video_id is not None:
+                    return (str(task), str(split), video_id, original_idx)
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                pass
+            # Requests whose video cannot be resolved must not be grouped.
+            return ("", "", f"__request_{original_idx}", original_idx)
+
+        grouped = sorted(indexed_requests, key=video_group)
+        grouped_results = super().generate_until([request for _, request in grouped])
+        restored = [None] * len(grouped_results)
+        for (original_idx, _), result in zip(grouped, grouped_results):
+            restored[original_idx] = result
+        return restored
+
+    def clean(self):
+        if _shutdown_vgent_instance is not None:
+            _shutdown_vgent_instance()
+        try:
+            asyncio.run(self.client.close())
+        except RuntimeError:
+            # The client may already be closed during interpreter teardown.
+            pass
+        super().clean()
 
     # ------------------------------------------------------------------
     # Core Vgent query method
