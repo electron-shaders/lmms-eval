@@ -413,6 +413,9 @@ class JobScheduler:
                 model_args_str = str(config["model_args"])
             cmd.extend(["--model_args", model_args_str])
 
+        if config.get("include_path"):
+            cmd.extend(["--include_path", config["include_path"]])
+
         if config.get("batch_size"):
             cmd.extend(["--batch_size", str(config["batch_size"])])
 

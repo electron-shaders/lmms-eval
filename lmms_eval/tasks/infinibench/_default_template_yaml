@@ -1,0 +1,55 @@
+dataset_path: Vision-CAIR/InfiniBench
+output_type: generate_until
+doc_to_visual: !function utils.infinibench_doc_to_visual
+doc_to_text: !function utils.infinibench_doc_to_text
+doc_to_messages: !function utils.infinibench_doc_to_messages
+doc_to_target: !function utils.infinibench_doc_to_target
+process_results: !function utils.infinibench_process_results
+generation_kwargs:
+  max_new_tokens: 1024
+  temperature: 0
+  top_p: 1.0
+  do_sample: false
+lmms_eval_specific_kwargs:
+  default:
+    use_subtitles: true
+metric_list:
+  - metric: mcq_accuracy
+    aggregation: !function utils.infinibench_aggregate_mcq
+    higher_is_better: true
+  - metric: gpt_score
+    aggregation: !function utils.infinibench_aggregate_gpt
+    higher_is_better: true
+  - metric: judge_success_rate
+    aggregation: mean
+    higher_is_better: true
+  - metric: character_actions_accuracy
+    aggregation: !function utils.infinibench_aggregate_mcq
+    higher_is_better: true
+  - metric: scene_transitions_accuracy
+    aggregation: !function utils.infinibench_aggregate_mcq
+    higher_is_better: true
+  - metric: choronological_understanding_accuracy
+    aggregation: !function utils.infinibench_aggregate_mcq
+    higher_is_better: true
+  - metric: global_appearance_accuracy
+    aggregation: !function utils.infinibench_aggregate_mcq
+    higher_is_better: true
+  - metric: summarization_gpt_score
+    aggregation: !function utils.infinibench_aggregate_gpt
+    higher_is_better: true
+  - metric: spoiler_questions_gpt_score
+    aggregation: !function utils.infinibench_aggregate_gpt
+    higher_is_better: true
+  - metric: deep_context_understanding_gpt_score
+    aggregation: !function utils.infinibench_aggregate_gpt
+    higher_is_better: true
+  - metric: linking_multiple_events_gpt_score
+    aggregation: !function utils.infinibench_aggregate_gpt
+    higher_is_better: true
+  - metric: submission_count
+    aggregation: !function utils.infinibench_aggregate_submissions
+    higher_is_better: false
+metadata:
+  version: 0.0
+  official_evaluator_revision: c4d4aa9c627a2af5fa1cfa9bf15f1f62b638d1da

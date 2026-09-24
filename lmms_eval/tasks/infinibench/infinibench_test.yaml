@@ -1,0 +1,12 @@
+include: _default_template_yaml
+task: infinibench_test
+test_split: test
+dataset_kwargs:
+  revision: 1a46b0b303303515fa5872e3704c8b27a8ab7b0a
+  data_files:
+    test: test/skills_json/*.json
+process_results: !function utils.infinibench_process_results_test
+metric_list:
+  - metric: submission_count
+    aggregation: !function utils.infinibench_aggregate_submissions
+    higher_is_better: false

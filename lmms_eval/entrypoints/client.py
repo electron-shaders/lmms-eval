@@ -154,6 +154,7 @@ class EvalClient:
         predict_only: bool = False,
         num_gpus: int = 1,
         output_dir: Optional[str] = None,
+        include_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Submit an evaluation job.
@@ -171,6 +172,7 @@ class EvalClient:
             predict_only: Only generate predictions, skip metrics
             num_gpus: Number of GPUs to use
             output_dir: Output directory for results
+            include_path: Additional local task definitions, such as pinned HPO tasks
 
         Returns:
             Dict with job_id, status, position_in_queue, message
@@ -188,6 +190,7 @@ class EvalClient:
             "predict_only": predict_only,
             "num_gpus": num_gpus,
             "output_dir": output_dir,
+            "include_path": include_path,
         }
         # Remove None values
         payload = {k: v for k, v in payload.items() if v is not None}

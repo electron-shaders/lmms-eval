@@ -350,6 +350,7 @@ python -m lmms_eval --tasks list_with_num
 ### Long Video & Temporal Understanding
 - [Charades-STA](https://github.com/jiyanggao/TALL) (charades_sta)
 - [FALCON-Bench](https://falcon-bench.github.io/) (FALCONBench) - One-hour-long video understanding
+- [InfiniBench](https://github.com/Vision-CAIR/Infinibench) (`infinibench_train`, `infinibench_val`, `infinibench_test`, plus `_mcq` and `_qa` variants for each split) - Eight long-video skills; [setup and scoring](../../lmms_eval/tasks/infinibench/README.md)
 - [LEMONADE](https://huggingface.co/datasets/amathislab/LEMONADE) (lemonade)
 - [LongTimescope](https://longtimescope.github.io/) (longtimescope)
 - [LongVT](https://longvt-bench.github.io/) (longvt) - Tool-based long video understanding

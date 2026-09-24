@@ -18,11 +18,14 @@ def _tool_input_schema(tool):
 
 
 class MCPClient:
-    def __init__(self, server_path: str, timeout: float | timedelta = 600.0):
+    def __init__(self, server_path: Optional[str] = None, timeout: float | timedelta = 600.0, *, server_url: Optional[str] = None):
         """
-        Initialize the MCPClient with the path to the MCP server.
+        Connect to a Python server over stdio or an existing Streamable HTTP server.
         """
         self.server_path = server_path
+        self.server_url = server_url
+        if bool(server_path) == bool(server_url):
+            raise ValueError("Provide exactly one of server_path or server_url")
         self.timeout = timeout.total_seconds() if isinstance(timeout, timedelta) else float(timeout)
         self._session: Optional[ClientSession] = None
         self._exit_stack: Optional[AsyncExitStack] = None
@@ -35,7 +38,7 @@ class MCPClient:
         return StdioServerParameters(command=sys.executable, args=[self.server_path])
 
     async def connect(self) -> ClientSession:
-        """Start one MCP subprocess and retain its session until ``close``."""
+        """Open one MCP transport and retain its session until ``close``."""
         if self._session is not None:
             return self._session
 
@@ -45,7 +48,13 @@ class MCPClient:
 
             stack = AsyncExitStack()
             try:
-                read_stream, write_stream = await stack.enter_async_context(stdio_client(server=self._server_params()))
+                if self.server_url:
+                    from mcp.client.streamable_http import streamable_http_client
+
+                    streams = await stack.enter_async_context(streamable_http_client(self.server_url))
+                    read_stream, write_stream = streams[:2]
+                else:
+                    read_stream, write_stream = await stack.enter_async_context(stdio_client(server=self._server_params()))
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream, read_timeout_seconds=self.timeout))
                 await session.initialize()
             except BaseException:

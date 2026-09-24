@@ -36,6 +36,7 @@ class EvaluateRequest(BaseModel):
     predict_only: bool = Field(default=False, description="Only generate predictions")
     num_gpus: int = Field(default=1, description="Number of GPUs to use")
     output_dir: Optional[str] = Field(default=None, description="Output directory for results")
+    include_path: Optional[str] = Field(default=None, description="Additional local task definitions, e.g. a frozen HPO dataset revision")
 
 
 class JobInfo(BaseModel):

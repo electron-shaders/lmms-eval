@@ -13,6 +13,7 @@ from loguru import logger as eval_logger
 from openai import AsyncOpenAI
 from tqdm import tqdm
 
+from lmms_eval.api.exceptions import FatalEvaluationError
 from lmms_eval.api.instance import GenerationResult, Instance, TokenCounts
 from lmms_eval.api.model import lmms
 from lmms_eval.api.registry import register_model
@@ -69,6 +70,7 @@ class AsyncOpenAIChat(lmms):
         timeout: int = 600,
         retry_backoff_s: Optional[float] = None,
         max_retries: int = 5,
+        fail_on_request_error: bool = False,
         max_size_in_mb: int = 20,
         mcp_server_path: str = None,
         num_cpus: int = None,
@@ -101,6 +103,7 @@ class AsyncOpenAIChat(lmms):
         self.timeout = timeout
         self.retry_backoff_s = max(0.0, float(1.0 if retry_backoff_s is None else retry_backoff_s))
         self.max_retries = max_retries
+        self.fail_on_request_error = parse_bool(fail_on_request_error)
         self.max_size_in_mb = max_size_in_mb  # some models have a limit on the size of the image
         try:
             self.batch_size_per_gpu = int(batch_size)
@@ -117,7 +120,7 @@ class AsyncOpenAIChat(lmms):
         self.nframes = nframes
         self.base_url = base_url if base_url is not None else os.getenv("OPENAI_API_BASE")
         self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=timeout)
+        self.client = self._create_client()
         self.max_pixels = max_pixels
         self.min_pixels = min_pixels
         self.max_frames = max_frames
@@ -168,6 +171,13 @@ class AsyncOpenAIChat(lmms):
             self._world_size = self.accelerator.num_processes
 
         self.device = self.accelerator.device
+
+    def _create_client(self):
+        return AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
+
+    def _run_async(self, coroutine):
+        """Run one generation batch; adapters may scope async resources here."""
+        return asyncio.run(coroutine)
 
     @property
     def model(self):
@@ -393,6 +403,11 @@ class AsyncOpenAIChat(lmms):
                         content, original_idx, token_counts = await self.maybe_forward_with_tool(req, idx)
                         elapsed = time.time() - started_at
                         return content, original_idx, token_counts, True, rate_limited, elapsed
+                    except FatalEvaluationError:
+                        # A backend has determined the pipeline is unsafe to use.
+                        # Cancel remaining requests via run_requests' finally;
+                        # do not retry or turn this into a scored error string.
+                        raise
                     except Exception as exc:
                         error_msg = _format_request_exception(exc)
                         last_error_msg = error_msg
@@ -400,6 +415,8 @@ class AsyncOpenAIChat(lmms):
                         eval_logger.info(f"Attempt {attempt + 1}/{self.max_retries} failed for request {idx} with error: {error_msg}")
                         if attempt == self.max_retries - 1:
                             eval_logger.error(f"All {self.max_retries} attempts failed. Last error: {error_msg}")
+                            if self.fail_on_request_error:
+                                raise RuntimeError(f"Evaluation aborted: request {idx} failed after {self.max_retries} attempts: {error_msg}") from exc
                         else:
                             await asyncio.sleep(self.retry_backoff_s)
 
@@ -453,51 +470,57 @@ class AsyncOpenAIChat(lmms):
                 request_latencies = []
                 completed_since_adapt = 0
 
-            while cursor < len(dispatch_order) or in_flight:
-                while cursor < len(dispatch_order) and len(in_flight) < max(1, current_concurrency):
-                    request_index = dispatch_order[cursor]
-                    task = asyncio.create_task(_process(requests[request_index], request_index))
-                    in_flight[task] = request_index
-                    cursor += 1
+            try:
+                while cursor < len(dispatch_order) or in_flight:
+                    while cursor < len(dispatch_order) and len(in_flight) < max(1, current_concurrency):
+                        request_index = dispatch_order[cursor]
+                        task = asyncio.create_task(_process(requests[request_index], request_index))
+                        in_flight[task] = request_index
+                        cursor += 1
 
-                if not in_flight:
-                    break
+                    if not in_flight:
+                        break
 
-                done, _ = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    in_flight.pop(task, None)
-                    (
-                        content,
-                        request_idx,
-                        token_counts,
-                        success,
-                        rate_limited,
-                        elapsed,
-                    ) = task.result()
-                    res.append(
+                    done, _ = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        in_flight.pop(task, None)
                         (
-                            GenerationResult(
-                                text=content,
-                                token_counts=token_counts,
-                                workload={"latency_s": elapsed},
-                            ),
+                            content,
                             request_idx,
+                            token_counts,
+                            success,
+                            rate_limited,
+                            elapsed,
+                        ) = task.result()
+                        res.append(
+                            (
+                                GenerationResult(
+                                    text=content,
+                                    token_counts=token_counts,
+                                    workload={"latency_s": elapsed},
+                                ),
+                                request_idx,
+                            )
                         )
-                    )
-                    if not success:
-                        failed_requests += 1
-                    if rate_limited:
-                        rate_limited_requests += 1
-                    request_latencies.append(elapsed)
-                    completed_since_adapt += 1
-                    totals = get_running_totals()
-                    pbar.set_postfix({"tokens": f"{totals['total_tokens']:,}"}, refresh=False)
-                    pbar.update(1)
-                    maybe_update_concurrency(force=False)
+                        if not success:
+                            failed_requests += 1
+                        if rate_limited:
+                            rate_limited_requests += 1
+                        request_latencies.append(elapsed)
+                        completed_since_adapt += 1
+                        totals = get_running_totals()
+                        pbar.set_postfix({"tokens": f"{totals['total_tokens']:,}"}, refresh=False)
+                        pbar.update(1)
+                        maybe_update_concurrency(force=False)
 
-            maybe_update_concurrency(force=True)
-
-            pbar.close()
+                maybe_update_concurrency(force=True)
+            finally:
+                # Let each conversation unwind its MCP contexts before shared
+                # clients or the owning event loop are closed on failure.
+                for task in in_flight:
+                    task.cancel()
+                await asyncio.gather(*in_flight, return_exceptions=True)
+                pbar.close()
             return res
 
         async def run():
@@ -506,7 +529,7 @@ class AsyncOpenAIChat(lmms):
             async with self.mcp_client:
                 return await run_requests()
 
-        eval_results = asyncio.run(run())
+        eval_results = self._run_async(run())
         eval_results.sort(key=lambda x: x[1])  # Sort by index to restore original
         results = results + [content for content, _ in eval_results]
         if self.mcp_client is not None:

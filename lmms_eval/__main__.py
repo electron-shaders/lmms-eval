@@ -30,6 +30,7 @@ from accelerate.utils import InitProcessGroupKwargs
 from loguru import logger as eval_logger
 
 from lmms_eval import evaluator, utils
+from lmms_eval.api.exceptions import FatalEvaluationError
 from lmms_eval.api.metrics import power_analysis
 from lmms_eval.api.registry import ALL_TASKS
 from lmms_eval.cli.power_utils import collect_task_sizes
@@ -589,7 +590,9 @@ def cli_evaluate(args: Union[argparse.Namespace, None] = None) -> None:
                     eval_logger.info(f"Logging to SwanLab failed due to {e}")
 
         except Exception as e:
-            if args.verbosity == "DEBUG":
+            if isinstance(e, FatalEvaluationError) or args.verbosity == "DEBUG":
+                # Keep a fatal backend failure fatal at normal verbosity too:
+                # nonzero process status lets the launcher clean up this run.
                 raise e
             else:
                 traceback.print_exc()

@@ -152,6 +152,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "vgent": "VgentModel",
     "dvd": "DVDModel",
     "videorag": "VideoRAGModel",
+    "m3agent": "M3AgentModel",
 }
 
 MODEL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -164,6 +165,7 @@ MODEL_ALIASES: dict[str, tuple[str, ...]] = {
     "vgent": ("vgent_vllm", "vgent_model"),
     "dvd": ("deep_video_discovery",),
     "videorag": ("video_rag", "videorag_model"),
+    "m3agent": ("m3_agent", "m3-agent"),
 }
 
 

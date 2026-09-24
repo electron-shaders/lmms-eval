@@ -335,7 +335,11 @@ class VLLM(lmms):
         except (TypeError, ValueError):
             eval_logger.warning("Invalid max_new_tokens from task (%s), falling back to model setting (%s)." % (request_max_new_tokens, self.max_new_tokens))
             return self.max_new_tokens
-        return max(request_max_new_tokens, self.max_new_tokens)
+        if request_max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be a positive integer")
+        # Task/CLI generation settings are authoritative. The model setting is
+        # a default, not a floor that silently increases a task's token budget.
+        return request_max_new_tokens
 
     @staticmethod
     def _normalize_top_p_for_vllm(top_p: Any) -> Any:
@@ -350,11 +354,14 @@ class VLLM(lmms):
         return top_p
 
     def _build_sampling_params_dict(self, gen_kwargs: dict[str, Any]) -> dict[str, Any]:
-        return {
+        params = {
             "max_tokens": gen_kwargs["max_new_tokens"],
             "temperature": gen_kwargs["temperature"],
             "top_p": self._normalize_top_p_for_vllm(gen_kwargs["top_p"]),
         }
+        if "thinking_token_budget" in gen_kwargs:
+            params["thinking_token_budget"] = gen_kwargs["thinking_token_budget"]
+        return params
 
     def _run_tp_synced(
         self,

@@ -1,0 +1,3 @@
+include: infinibench_val.yaml
+task: infinibench_val_mcq
+process_docs: !function utils.infinibench_process_docs_mcq

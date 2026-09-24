@@ -1,0 +1,3 @@
+include: infinibench_train.yaml
+task: infinibench_train_mcq
+process_docs: !function utils.infinibench_process_docs_mcq

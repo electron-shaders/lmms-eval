@@ -1,0 +1,7 @@
+include: _default_template_yaml
+task: infinibench_train
+test_split: train
+dataset_kwargs:
+  revision: 1a46b0b303303515fa5872e3704c8b27a8ab7b0a
+  data_files:
+    train: train/skills_json/*.json
