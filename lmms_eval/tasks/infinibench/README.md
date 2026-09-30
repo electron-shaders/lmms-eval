@@ -163,15 +163,3 @@ and JSON dictionaries inside a ZIP. This task intentionally uses the requested
 
 The adapted judging code retains the upstream BSD 3-Clause license in
 [LICENSE.md](LICENSE.md).
-
-## Verification
-
-```bash
-python -m pytest test/eval/test_infinibench.py -q
-```
-
-The tests cover the official judge prompt/request, strict MCQ matching, skill
-weighting, failed judgments, multipart media downloads and cache reuse, and an
-eight-question evaluator run for each combined task and a five-question run for
-each subset with real MP4 decoding, including filtering before limits. Unit smoke
-runs use synthetic annotations and a mocked judge; they make no paid API calls.

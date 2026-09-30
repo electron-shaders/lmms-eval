@@ -23,6 +23,9 @@ Environment variables
 ----------------------
     VGENT_PATH            sys.path prefix for ``vgent_adapter`` import.
     VGENT_GRAPH_DIR       Overrides ``vgent_graph_dir`` model arg.
+    VGENT_GRAPH_MAX_NEW_TOKENS        Initial graph-chunk budget (default: 2048).
+    VGENT_GRAPH_MAX_NEW_TOKENS_LIMIT  Graph truncation retry ceiling (default: 16384).
+    VGENT_TRUNCATION_MAX_TOKENS       Final-answer retry ceiling (default: 16384).
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ _vgent_loaded: bool = False
 _run_vgent_query = None        # callable(video_id, query, video_path, output_dir, question, candidates, doc, subtitle_path, model_name, task) -> str
 _init_vgent_instance = None    # callable(model_name, task, openai_client, model_version) -> None
 _shutdown_vgent_instance = None
+_cancel_vgent_instance = None
 
 
 def _load_vgent(vgent_path: str | None) -> bool:
@@ -52,7 +56,7 @@ def _load_vgent(vgent_path: str | None) -> bool:
 
     Returns True if the query function was imported successfully.
     """
-    global _vgent_loaded, _run_vgent_query, _init_vgent_instance, _shutdown_vgent_instance
+    global _vgent_loaded, _run_vgent_query, _init_vgent_instance, _shutdown_vgent_instance, _cancel_vgent_instance
 
     if _vgent_loaded:
         return _run_vgent_query is not None
@@ -74,6 +78,7 @@ def _load_vgent(vgent_path: str | None) -> bool:
         _run_vgent_query = _va.run_vgent_query
         _init_vgent_instance = _va.init_vgent_instance
         _shutdown_vgent_instance = _va.shutdown_vgent_instance
+        _cancel_vgent_instance = _va.cancel_vgent_instance
         _vgent_loaded = True
         eval_logger.info("[Vgent] Imported run_vgent_query")
         return True
@@ -182,6 +187,12 @@ class VgentModel(AsyncOpenAIChat):
     All parameters accepted by the base ``async_openai`` backend are forwarded
     transparently. Vgent-specific parameters are consumed here.
 
+    Final-answer budgets come from task/CLI generation settings, e.g.
+    ``--gen_kwargs max_new_tokens=2048,thinking_token_budget=512``.
+    Truncated final answers retry up to ``VGENT_TRUNCATION_MAX_TOKENS``
+    (default: 16384). Raw answers are parsed/graded only by lmms-eval;
+    exhausted request retries are nonfatal by default.
+
     Parameters
     ----------
     vgent_graph_dir : str
@@ -192,6 +203,10 @@ class VgentModel(AsyncOpenAIChat):
     vgent_model_name : str, optional
         Model identifier passed to Vgent's graph builder. Should match the
         ``model`` arg. Default: \"\" (uses ``model``).
+    graph_max_new_tokens, graph_max_new_tokens_limit : int, optional
+        Initial graph-chunk output budget and retry ceiling. Model args take
+        precedence over the corresponding VGENT_GRAPH_* environment variables.
+        These settings do not change the final-answer generation budget.
     """
 
     is_simple = False
@@ -202,9 +217,12 @@ class VgentModel(AsyncOpenAIChat):
         vgent_graph_dir: str = "",
         vgent_path: str = "",
         vgent_model_name: str = "",
+        graph_max_new_tokens: int | None = None,
+        graph_max_new_tokens_limit: int | None = None,
         # All other kwargs forwarded to AsyncOpenAIChat
         **kwargs,
     ):
+        kwargs.setdefault("fail_on_request_error", False)
         super().__init__(**kwargs)
 
         # For Vgent, BATCH_SIZE is the overall concurrent model API request budget.
@@ -252,11 +270,41 @@ class VgentModel(AsyncOpenAIChat):
                 openai_model_version=self.model_version,
                 batch_size=self.batch_size_per_gpu,
                 openai_timeout=self.timeout,
+                graph_max_new_tokens=graph_max_new_tokens,
+                graph_max_new_tokens_limit=graph_max_new_tokens_limit,
             )
 
         os.makedirs(self.vgent_graph_dir, exist_ok=True)
 
     def generate_until(self, requests):
+        try:
+            return self._generate_grouped(requests)
+        except BaseException:
+            # The evaluator only calls clean() on success. On failure, this
+            # runs after _run_async has cancelled and drained query workers.
+            try:
+                self.clean()
+            except Exception:
+                eval_logger.exception("[Vgent] Cleanup failed after evaluation error")
+            raise
+
+    def _run_async(self, coroutine):
+        async def run_with_cancellation():
+            try:
+                return await coroutine
+            except BaseException:
+                # This must precede asyncio.run's default-executor shutdown.
+                # Cancelling asyncio tasks alone cannot stop running threads.
+                try:
+                    if _cancel_vgent_instance is not None:
+                        _cancel_vgent_instance()
+                except Exception:
+                    eval_logger.exception("[Vgent] Failed to signal cancellation")
+                raise
+
+        return super()._run_async(run_with_cancellation())
+
+    def _generate_grouped(self, requests):
         """Group questions by video while preserving result order."""
         indexed_requests = list(enumerate(requests))
 
@@ -281,14 +329,17 @@ class VgentModel(AsyncOpenAIChat):
         return restored
 
     def clean(self):
-        if _shutdown_vgent_instance is not None:
-            _shutdown_vgent_instance()
+        if getattr(self, "_vgent_cleaned", False):
+            return
+        self._vgent_cleaned = True
         try:
-            asyncio.run(self.client.close())
-        except RuntimeError:
-            # The client may already be closed during interpreter teardown.
-            pass
-        super().clean()
+            if _shutdown_vgent_instance is not None:
+                _shutdown_vgent_instance()
+        finally:
+            try:
+                asyncio.run(self.client.close())
+            finally:
+                super().clean()
 
     # ------------------------------------------------------------------
     # Core Vgent query method
@@ -299,6 +350,7 @@ class VgentModel(AsyncOpenAIChat):
         raw_messages: list[dict],
         task: str,
         doc: dict,
+        generation_kwargs: dict | None = None,
     ) -> list[dict]:
         """
         Follow Vgent workflow as implemented in vgent_rag.py
@@ -333,6 +385,8 @@ class VgentModel(AsyncOpenAIChat):
                 subtitle_path=subtitle_path,
                 model_name=self.vgent_model_id,
                 task=task,
+                generation_kwargs=dict(generation_kwargs or {}),
+                return_raw_response=True,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -361,7 +415,7 @@ class VgentModel(AsyncOpenAIChat):
         # Run in a thread-pool so the event loop is not blocked.
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
-            None, self._run_vgent_query, raw_messages, task, doc
+            None, self._run_vgent_query, raw_messages, task, doc, gen_kwargs
         )
 
         # Vgent performs its own multi-call workflow and returns no per-request
