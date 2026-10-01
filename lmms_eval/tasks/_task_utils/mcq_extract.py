@@ -121,13 +121,13 @@ def extract_mcq_answer(response: str, choices: Optional[List[str]] = None) -> st
     # --- Common answer phrases ("the answer is A", etc.) ---
     text_lower = text.lower()
     for phrase in _ANSWER_PHRASES:
-        idx = text_lower.find(phrase)
+        idx = text_lower.rfind(phrase)
         if idx != -1:
             after = idx + len(phrase)
             for ch in all_choices:
-                ch_pos = text.find(ch, after)
-                if ch_pos != -1:
-                    candidates.append((ch, ch_pos, "phrase"))
+                match = re.match(rf"[\s:*_`(\[]*({re.escape(ch)})(?!\w)", text[after:])
+                if match:
+                    candidates.append((ch, after + match.start(1), "phrase"))
 
     # --- Starts with standalone choice letter (not part of a word) ---
     stripped = text.strip()
@@ -140,11 +140,12 @@ def extract_mcq_answer(response: str, choices: Optional[List[str]] = None) -> st
         if stripped.endswith(ch) and (len(stripped) == 1 or not stripped[-2].isalpha()):
             candidates.append((ch, len(text) - 1, "end"))
 
-    # --- Fallback: any occurrence (lowest priority) ---
+    # --- Fallback: standalone letter (lowest priority) ---
     if not candidates:
         for ch in all_choices:
-            if ch in text:
-                candidates.append((ch, text.rfind(ch), "fallback"))
+            matches = list(re.finditer(rf"(?<!\w){re.escape(ch)}(?!\w)", text))
+            if matches:
+                candidates.append((ch, matches[-1].start(), "fallback"))
 
     if not candidates:
         return ""
