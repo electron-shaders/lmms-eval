@@ -1,4 +1,4 @@
-"""Modern lmms-eval adapter for Video-XL-2 bi-level inference.
+"""Modern lmms-eval adapter for Video-XL-2 chunk and bi-level inference.
 
 The upstream Video-XL-2 repository bundles an old evaluator and tightly
 couples selection lookup to prompt formatting.  This adapter reuses only its
@@ -205,12 +205,12 @@ def _load_legacy_adapter(code_path: Path):
     package_root = code_path / "videoxl2"
     if not source.is_file() or not package_root.is_dir():
         raise FileNotFoundError(
-            "videoxl2_code_path must point to the w_chunk_bilevel directory "
+            "videoxl2_code_path must point to the w_chunk or w_chunk_bilevel directory "
             f"(missing {source} or {package_root})"
         )
     if str(code_path) not in sys.path:
         sys.path.insert(0, str(code_path))
-    module_name = "_lmms_eval_videoxl2_bilevel_legacy"
+    module_name = f"_lmms_eval_videoxl2_{code_path.name}_legacy"
     module = sys.modules.get(module_name)
     if module is None:
         spec = importlib.util.spec_from_file_location(module_name, source)
@@ -248,7 +248,7 @@ def _count_selected_units(value: Any) -> int:
 
 @register_model("videoxl2")
 class VideoXL2(lmms):
-    """Video-XL-2 bi-level model hosted by the current evaluator."""
+    """Video-XL-2 chunk or bi-level model hosted by the current evaluator."""
 
     is_simple = True
 
@@ -264,27 +264,29 @@ class VideoXL2(lmms):
         super().__init__()
         if not videoxl2_code_path:
             raise ValueError("videoxl2_code_path is required")
-        if not selection_manifest:
-            raise ValueError("selection_manifest is required")
-        self.selection_resolver = SelectionResolver(selection_manifest, selection_policy)
         self.block_size_chosed = int(block_size_chosed)
         legacy_class = _load_legacy_adapter(Path(videoxl2_code_path))
         legacy_kwargs.pop("max_batch_size", None)
 
-        selection_paths = [path for paths in self.selection_resolver.task_paths.values() for path in paths]
+        self.selection_resolver = None
         self._bootstrap_selection_file: Optional[str] = None
-        if selection_paths:
-            bootstrap_selection = selection_paths[0]
-        else:
-            handle = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-            json.dump({}, handle)
-            handle.close()
-            self._bootstrap_selection_file = handle.name
-            bootstrap_selection = handle.name
+        if hasattr(legacy_class, "get_selected_unit_indices"):
+            if not selection_manifest:
+                raise ValueError("selection_manifest is required for bi-level inference")
+            self.selection_resolver = SelectionResolver(selection_manifest, selection_policy)
+            selection_paths = [path for paths in self.selection_resolver.task_paths.values() for path in paths]
+            if selection_paths:
+                bootstrap_selection = selection_paths[0]
+            else:
+                handle = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+                json.dump({}, handle)
+                handle.close()
+                self._bootstrap_selection_file = handle.name
+                bootstrap_selection = handle.name
+            legacy_kwargs["selected_info_file_path"] = bootstrap_selection
 
         self._impl = legacy_class(
             pretrained=pretrained,
-            selected_info_file_path=bootstrap_selection,
             block_size_chosed=self.block_size_chosed,
             **legacy_kwargs,
         )
@@ -295,7 +297,8 @@ class VideoXL2(lmms):
         self.batch_size_per_gpu = self._impl.batch_size
         self.chat_template = None
         eval_logger.info(
-            "Video-XL-2 bi-level adapter loaded with selection_policy={} manifest={}",
+            "Video-XL-2 adapter loaded from {} with selection_policy={} manifest={}",
+            videoxl2_code_path,
             selection_policy,
             selection_manifest,
         )
@@ -339,6 +342,9 @@ class VideoXL2(lmms):
         # guarantees incomplete coverage cannot produce a partial evaluation.
         for request in requests:
             task, doc_id, doc, video_path = self._document_and_video(request)
+            if self.selection_resolver is None:
+                prepared.append((request, task, doc_id, None, None, {"selection_mode": "w_chunk"}))
+                continue
             try:
                 selected_indices, selected_config, selection_meta = self.selection_resolver.resolve(
                     task, doc_id, doc, video_path
@@ -358,7 +364,7 @@ class VideoXL2(lmms):
         for request, task, doc_id, selected_indices, selected_config, selection_meta in prepared:
             decoded_frames = 0
             output_tokens: Optional[int] = None
-            original_selector = self._impl.get_selected_unit_indices
+            original_selector = getattr(self._impl, "get_selected_unit_indices", None)
             original_load_video = self._impl.load_video
             original_batch_decode = self._impl.tokenizer.batch_decode
 
@@ -380,14 +386,16 @@ class VideoXL2(lmms):
                     output_tokens = None
                 return original_batch_decode(token_ids, *args, **kwargs)
 
-            self._impl.get_selected_unit_indices = fixed_selector
+            if original_selector is not None:
+                self._impl.get_selected_unit_indices = fixed_selector
             self._impl.load_video = measured_load_video
             self._impl.tokenizer.batch_decode = measured_batch_decode
             started = time.perf_counter()
             try:
                 text = self._impl.generate_until([request])[0]
             finally:
-                self._impl.get_selected_unit_indices = original_selector
+                if original_selector is not None:
+                    self._impl.get_selected_unit_indices = original_selector
                 self._impl.load_video = original_load_video
                 self._impl.tokenizer.batch_decode = original_batch_decode
             latency = time.perf_counter() - started
@@ -402,7 +410,7 @@ class VideoXL2(lmms):
                 "selected_units": selected_units,
                 "selected_unit_indices": selected_indices,
                 "selection_config": selected_config,
-                "selection_coverage": self.selection_resolver.coverage_summary().get(task),
+                "selection_coverage": self.selection_resolver.coverage_summary().get(task) if self.selection_resolver else None,
             }
             results.append(
                 GenerationResult(
