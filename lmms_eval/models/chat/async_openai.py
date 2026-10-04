@@ -31,6 +31,7 @@ from lmms_eval.models.model_utils.usage_metrics import (
     is_budget_exceeded,
     log_usage,
 )
+from lmms_eval.models.model_utils.qwen35_sampling import openai_generation_kwargs, thinking_enabled
 from lmms_eval.protocol import ChatMessages
 
 VideoReader, _ = optional_import("decord", "VideoReader")
@@ -92,6 +93,7 @@ class AsyncOpenAIChat(lmms):
         prefix_aware_queue: bool = True,
         prefix_hash_chars: int = 256,
         system_prompt: Optional[str] = None,
+        enable_thinking: Optional[bool] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -100,6 +102,8 @@ class AsyncOpenAIChat(lmms):
         if kwargs:
             eval_logger.warning(f"Unknown model_args ignored: {list(kwargs.keys())}. " f"Check the supported parameters for the 'async_openai' backend.")
         self.model_version = model_version
+        if enable_thinking is not None or not hasattr(self, "enable_thinking"):
+            self.enable_thinking = thinking_enabled(enable_thinking)
         self.timeout = timeout
         self.retry_backoff_s = max(0.0, float(1.0 if retry_backoff_s is None else retry_backoff_s))
         self.max_retries = max_retries
@@ -252,17 +256,7 @@ class AsyncOpenAIChat(lmms):
         total_output_tokens = 0
         total_reasoning_tokens = 0
 
-        if "max_new_tokens" not in gen_kwargs:
-            gen_kwargs["max_new_tokens"] = 1024
-        if "temperature" not in gen_kwargs:
-            gen_kwargs["temperature"] = 0
-        if "top_p" not in gen_kwargs:
-            gen_kwargs["top_p"] = None
-        if "do_sample" not in gen_kwargs:
-            gen_kwargs["do_sample"] = False
-        # payload["max_completion_tokens"] = gen_kwargs["max_new_tokens"]
-        payload["max_tokens"] = gen_kwargs["max_new_tokens"]
-        payload["temperature"] = gen_kwargs["temperature"]
+        payload.update(openai_generation_kwargs(self.model_version, gen_kwargs, enable_thinking=self.enable_thinking))
 
         if self.mcp_client is not None:
             # get the function list from the MCP server
@@ -329,14 +323,7 @@ class AsyncOpenAIChat(lmms):
                         tool_messages[-1]["content"].extend(tool_message)
                     all_response += "</tool_response>"
 
-            response = await self.client.chat.completions.create(
-                model=self.model_version,
-                messages=messages + tool_messages,
-                max_tokens=gen_kwargs["max_new_tokens"],
-                temperature=gen_kwargs["temperature"],
-                tools=functions,
-                tool_choice="auto",
-            )
+            response = await self.client.chat.completions.create(**{**payload, "messages": messages + tool_messages})
             # Extract usage metrics
             input_tokens = 0
             output_tokens = 0

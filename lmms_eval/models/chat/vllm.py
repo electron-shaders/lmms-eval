@@ -9,6 +9,8 @@ from lmms_eval.api.instance import GenerationResult, Instance, TokenCounts
 from lmms_eval.api.registry import register_model
 from lmms_eval.imports import optional_import
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
+from lmms_eval.models.model_utils.qwen35_sampling import is_qwen35_4b
+from lmms_eval.models.model_utils.vllm_chat import chat_with_template_groups
 from lmms_eval.models.simple.vllm import VLLM as VLLMSimple
 from lmms_eval.protocol import ChatMessages
 
@@ -94,26 +96,23 @@ class VLLM(VLLMSimple):
         for batch_requests in batched_requests:
             batched_messages = []
             batched_sampling_params = []
+            batched_template_options = []
             with ThreadPoolExecutor(max_workers=WORKERS) as executor:
                 futures = [executor.submit(self.make_one_request, request) for request in batch_requests]
-                for future in futures:
+                for request, future in zip(batch_requests, futures):
                     messages, sampling_params = future.result()
                     batched_messages.append(messages)
                     batched_sampling_params.append(sampling_params)
+                    options = self._chat_template_options(request.arguments[2]) if is_qwen35_4b(getattr(self, "model", "")) else {}
+                    batched_template_options.append(options)
 
             start_time = time.time()
 
-            def _run_chat(request_items: list[tuple[list[dict], dict]]) -> list[str]:
-                inputs = [messages for messages, _ in request_items]
-                sampling_params = [SamplingParams(**params) for _, params in request_items]
-                response = self.client.chat(
-                    sampling_params=sampling_params,
-                    messages=inputs,
-                    chat_template=self.chat_template,
-                )
+            def _run_chat(request_items: list[tuple[list[dict], dict, dict]]) -> list[str]:
+                response = chat_with_template_groups(self.client, request_items, SamplingParams, chat_template=self.chat_template)
                 return [o.outputs[0].text for o in response]
 
-            response_text = self._run_tp_synced(list(zip(batched_messages, batched_sampling_params)), _run_chat)
+            response_text = self._run_tp_synced(list(zip(batched_messages, batched_sampling_params, batched_template_options)), _run_chat)
             end_time = time.time()
 
             # Calculate timing metrics for batch
@@ -167,11 +166,14 @@ class VLLM(VLLMSimple):
             video_kwargs["nframes"] = self.nframes
         return chat_messages.to_openai_messages(video_kwargs=video_kwargs)
 
-    def _chat_once(self, messages: list[dict], params: dict) -> str:
+    def _chat_once(self, messages: list[dict], params: dict, template_options=None) -> str:
+        if template_options is None:
+            template_options = self._chat_template_options()
         response = self.client.chat(
             sampling_params=[SamplingParams(**params)],
             messages=[messages],
             chat_template=self.chat_template,
+            **template_options,
         )
         return response[0].outputs[0].text
 
@@ -192,6 +194,7 @@ class VLLM(VLLMSimple):
             ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.arguments
             doc = self.task_dict[task][split][doc_id]
             params = self._resolve_sampling_params(gen_kwargs)
+            template_options = self._chat_template_options(gen_kwargs)
 
             round_outputs: List[str] = []
             previous_round_info = None
@@ -213,7 +216,7 @@ class VLLM(VLLMSimple):
                         break
 
                 messages = self._to_openai_messages(raw_messages)
-                round_outputs.append(self._chat_once(messages, params))
+                round_outputs.append(self._chat_once(messages, params, template_options))
                 round_idx += 1
 
             results.append(round_outputs)

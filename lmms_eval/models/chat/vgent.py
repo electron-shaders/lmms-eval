@@ -410,13 +410,22 @@ class VgentModel(AsyncOpenAIChat):
         ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.args
         doc = self.task_dict[task][split][doc_id]
         raw_messages = doc_to_messages(doc)
+        generation = dict(gen_kwargs)
+        # Vgent's final answer runs through its own persistent API client. Carry
+        # the evaluator's thinking mode across that boundary; graph and other
+        # structured helper stages deliberately remain non-thinking.
+        enable_thinking = getattr(self, "enable_thinking", None)
+        if enable_thinking is not None:
+            extra_body = dict(generation.get("extra_body") or {})
+            template = dict(extra_body.get("chat_template_kwargs") or {})
+            template.setdefault("enable_thinking", generation.get("enable_thinking", enable_thinking))
+            extra_body["chat_template_kwargs"] = template
+            generation["extra_body"] = extra_body
 
         # Augmentation is CPU/disk-bound (graph lookup + embedding similarity).
         # Run in a thread-pool so the event loop is not blocked.
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None, self._run_vgent_query, raw_messages, task, doc, gen_kwargs
-        )
+        response = await loop.run_in_executor(None, self._run_vgent_query, raw_messages, task, doc, generation)
 
         # Vgent performs its own multi-call workflow and returns no per-request
         # usage object. Aggregate calls/tokens are captured from vLLM /metrics.

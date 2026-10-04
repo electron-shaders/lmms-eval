@@ -130,6 +130,7 @@ class VLLMGenerate(VLLMChat):
             messages,
             tokenize=False,
             add_generation_prompt=True,
+            **self._chat_template_options(_gen).get("chat_template_kwargs", {}),
         )
 
         vllm_inputs = {"prompt": text, "multi_modal_data": {}}

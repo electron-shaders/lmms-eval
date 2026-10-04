@@ -185,12 +185,13 @@ class DVDModel(AsyncOpenAIChat):
         dvd_global_browse_topk: int = 300,
         dvd_host: str = "127.0.0.1",
         dvd_port: int = 9002,
+        enable_thinking: bool = True,
         batch_size: int = 1,
         **kwargs,
     ):
         if "num_cpus" not in kwargs:
             kwargs["num_cpus"] = min(cpu_count(), int(batch_size))
-        super().__init__(**kwargs)
+        super().__init__(enable_thinking=enable_thinking, **kwargs)
 
         self.dvd_db_dir = dvd_db_dir or os.environ.get("DVD_DB_DIR", "./.dvd_dbs")
         self.dvd_max_iterations = int(
@@ -242,6 +243,7 @@ class DVDModel(AsyncOpenAIChat):
             dvd_venv_python=resolved_venv_python,
             dvd_host=dvd_host,
             dvd_port=int(dvd_port),
+            enable_thinking=enable_thinking,
         )
 
         os.makedirs(self.dvd_db_dir, exist_ok=True)
@@ -284,6 +286,7 @@ class DVDModel(AsyncOpenAIChat):
             video_path,
             question,
             task,
+            gen_kwargs,
         )
 
         eval_logger.debug(
@@ -302,6 +305,7 @@ class DVDModel(AsyncOpenAIChat):
         video_path: str,
         question: str,
         task: str,
+        generation_kwargs: Optional[dict] = None,
     ) -> str:
         """
         Async helper: build DVD database if needed, then run the agent.
@@ -329,6 +333,7 @@ class DVDModel(AsyncOpenAIChat):
                 max_iterations=self.dvd_max_iterations,
                 lite_mode=self.dvd_lite_mode,
                 srt_path=srt_path,
+                generation_kwargs=generation_kwargs,
             )
         except Exception as exc:
             eval_logger.error(f"[DVD] run_dvd_query failed: {exc}")

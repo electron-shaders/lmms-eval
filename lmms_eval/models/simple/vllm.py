@@ -18,6 +18,8 @@ from lmms_eval.api.registry import register_model
 from lmms_eval.imports import optional_import
 from lmms_eval.models.model_utils.media_encoder import encode_image_to_base64
 from lmms_eval.models.model_utils.progress import make_progress
+from lmms_eval.models.model_utils.qwen35_sampling import is_qwen35_4b, qwen35_generation_kwargs, thinking_enabled
+from lmms_eval.models.model_utils.vllm_chat import chat_with_template_groups
 
 NUM_SECONDS_TO_SLEEP = int(os.getenv("NUM_SECONDS_TO_SLEEP", "5"))
 WORKERS = int(os.getenv("WORKERS", "32"))
@@ -159,6 +161,7 @@ class VLLM(lmms):
         disable_log_stats: bool = False,
         image_first: bool = False,
         max_new_tokens: int = 1024,
+        enable_thinking: Optional[bool] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -166,6 +169,7 @@ class VLLM(lmms):
         # and split the text and image
         # Here we just use the same token as llava for convenient
         self.model = model
+        self.enable_thinking = thinking_enabled(enable_thinking)
         self.max_frame_num = max_frame_num
         self.chat_template = chat_template
         self.min_image_pixels = min_image_pixels
@@ -354,14 +358,22 @@ class VLLM(lmms):
         return top_p
 
     def _build_sampling_params_dict(self, gen_kwargs: dict[str, Any]) -> dict[str, Any]:
+        gen_kwargs = qwen35_generation_kwargs(getattr(self, "model", ""), gen_kwargs, enable_thinking=getattr(self, "enable_thinking", True))
         params = {
             "max_tokens": gen_kwargs["max_new_tokens"],
             "temperature": gen_kwargs["temperature"],
             "top_p": self._normalize_top_p_for_vllm(gen_kwargs["top_p"]),
         }
-        if "thinking_token_budget" in gen_kwargs:
-            params["thinking_token_budget"] = gen_kwargs["thinking_token_budget"]
+        for name in ("top_k", "min_p", "presence_penalty", "repetition_penalty", "frequency_penalty", "seed", "thinking_token_budget"):
+            if name in gen_kwargs:
+                params[name] = gen_kwargs[name]
         return params
+
+    def _chat_template_options(self, gen_kwargs=None):
+        if is_qwen35_4b(getattr(self, "model", "")):
+            generation = qwen35_generation_kwargs(self.model, gen_kwargs, enable_thinking=getattr(self, "enable_thinking", True))
+            return {"chat_template_kwargs": generation["extra_body"]["chat_template_kwargs"]}
+        return {}
 
     def _run_tp_synced(
         self,
@@ -533,6 +545,7 @@ class VLLM(lmms):
                         {
                             "messages": messages,
                             "sampling_params": sampling_params_dict,
+                            "chat_template_options": self._chat_template_options(gen_kwargs),
                             "workload": {
                                 "decoded_frames": decoded_frames if saw_video else None,
                                 "visual_inputs": len(self.flatten(imgs)),
@@ -549,17 +562,9 @@ class VLLM(lmms):
                 # The logic here is similar to the vllm implementation as shown here (https://docs.vllm.ai/en/stable/models/generative_models.html#llmchat)
                 # - vllm implementation: https://github.com/vllm-project/vllm/blob/d97841078b6e0dde8da36d5a2b8e8857a2c37944/vllm/entrypoints/chat_utils.py#L829
                 def _run_chat(inputs: list[Any]) -> list[GenerationResult]:
-                    messages = [item["messages"] for item in inputs]
-                    sampling_params = [SamplingParams(**item["sampling_params"]) for item in inputs]
                     started_at = time.perf_counter()
-                    if self.chat_template is not None:
-                        response = self.client.chat(
-                            sampling_params=sampling_params,
-                            messages=messages,
-                            chat_template=self.chat_template,
-                        )
-                    else:
-                        response = self.client.chat(sampling_params=sampling_params, messages=messages)
+                    request_items = [(item["messages"], item["sampling_params"], item["chat_template_options"]) for item in inputs]
+                    response = chat_with_template_groups(self.client, request_items, SamplingParams, chat_template=self.chat_template)
                     batch_latency = time.perf_counter() - started_at
                     generated: list[GenerationResult] = []
                     for output, item in zip(response, inputs):
