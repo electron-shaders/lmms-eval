@@ -9,17 +9,20 @@ import numpy as np
 import torch.distributed as dist
 from accelerate import Accelerator, DistributedType
 from decord import VideoReader, cpu
-from loguru import logger as eval_logger
-from PIL import Image
-
 from lmms_eval.api.instance import GenerationResult, Instance, TokenCounts
 from lmms_eval.api.model import lmms
 from lmms_eval.api.registry import register_model
 from lmms_eval.imports import optional_import
 from lmms_eval.models.model_utils.media_encoder import encode_image_to_base64
 from lmms_eval.models.model_utils.progress import make_progress
-from lmms_eval.models.model_utils.qwen35_sampling import is_qwen35_4b, qwen35_generation_kwargs, thinking_enabled
+from lmms_eval.models.model_utils.qwen35_sampling import (
+    is_qwen35_4b,
+    qwen35_generation_kwargs,
+    thinking_enabled,
+)
 from lmms_eval.models.model_utils.vllm_chat import chat_with_template_groups
+from loguru import logger as eval_logger
+from PIL import Image
 
 NUM_SECONDS_TO_SLEEP = int(os.getenv("NUM_SECONDS_TO_SLEEP", "5"))
 WORKERS = int(os.getenv("WORKERS", "32"))
@@ -373,6 +376,9 @@ class VLLM(lmms):
         if is_qwen35_4b(getattr(self, "model", "")):
             generation = qwen35_generation_kwargs(self.model, gen_kwargs, enable_thinking=getattr(self, "enable_thinking", True))
             return {"chat_template_kwargs": generation["extra_body"]["chat_template_kwargs"]}
+        enable_thinking = (gen_kwargs or {}).get("enable_thinking", getattr(self, "enable_thinking", None))
+        if enable_thinking is not None:
+            return {"chat_template_kwargs": {"enable_thinking": thinking_enabled(enable_thinking)}}
         return {}
 
     def _run_tp_synced(

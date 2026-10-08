@@ -3,16 +3,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
-from tqdm import tqdm
-
 from lmms_eval.api.instance import GenerationResult, Instance, TokenCounts
 from lmms_eval.api.registry import register_model
 from lmms_eval.imports import optional_import
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
-from lmms_eval.models.model_utils.qwen35_sampling import is_qwen35_4b
 from lmms_eval.models.model_utils.vllm_chat import chat_with_template_groups
 from lmms_eval.models.simple.vllm import VLLM as VLLMSimple
 from lmms_eval.protocol import ChatMessages
+from tqdm import tqdm
 
 LLM, _ = optional_import("vllm", "LLM")
 SamplingParams, _ = optional_import("vllm", "SamplingParams")
@@ -103,7 +101,7 @@ class VLLM(VLLMSimple):
                     messages, sampling_params = future.result()
                     batched_messages.append(messages)
                     batched_sampling_params.append(sampling_params)
-                    options = self._chat_template_options(request.arguments[2]) if is_qwen35_4b(getattr(self, "model", "")) else {}
+                    options = self._chat_template_options(request.arguments[2])
                     batched_template_options.append(options)
 
             start_time = time.time()
