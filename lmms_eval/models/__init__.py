@@ -153,6 +153,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "dvd": "DVDModel",
     "videorag": "VideoRAGModel",
     "m3agent": "M3AgentModel",
+    "playback": "PlaybackModel",
 }
 
 MODEL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -166,6 +167,7 @@ MODEL_ALIASES: dict[str, tuple[str, ...]] = {
     "dvd": ("deep_video_discovery",),
     "videorag": ("video_rag", "videorag_model"),
     "m3agent": ("m3_agent", "m3-agent"),
+    "playback": ("playback_rqvae", "playback_ablation"),
 }
 
 
