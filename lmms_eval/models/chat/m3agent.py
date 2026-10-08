@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 
+from loguru import logger as eval_logger
+
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.async_openai import AsyncOpenAIChat
 from lmms_eval.models.model_utils.concurrency_control import parse_bool
@@ -50,7 +52,8 @@ class M3AgentModel(AsyncOpenAIChat):
         self, m3agent_path="", m3agent_python="", m3agent_graph_dir="",
         m3agent_memory_manifest="", m3agent_build_memory=False,
         m3agent_memorization_model="ByteDance-Seed/M3-Agent-Memorization",
-        m3agent_voice_backend="local", m3agent_asr_model="openai/whisper-large-v3-turbo", m3agent_asr_device="cpu",
+        m3agent_voice_backend="local", m3agent_asr_model="openai/whisper-large-v3-turbo", m3agent_asr_device="cuda:0",
+        m3agent_face_device="cuda:0",
         m3agent_embed_base_url="http://127.0.0.1:9001/v1", m3agent_embed_model="BAAI/bge-m3",
         m3agent_embed_api_key="", m3agent_reembed=True,
         m3agent_cuda_devices=None, m3agent_worker_timeout=7200,
@@ -82,7 +85,7 @@ class M3AgentModel(AsyncOpenAIChat):
         kwargs.setdefault("batch_size", 64)
         kwargs.setdefault("base_url", "http://127.0.0.1:9000/v1")
         kwargs.setdefault("api_key", "EMPTY")
-        kwargs.setdefault("fail_on_request_error", True)
+        kwargs.setdefault("fail_on_request_error", False)
         super().__init__(**kwargs)
         self.num_cpus = self.batch_size_per_gpu
         self.adaptive_concurrency = False
@@ -93,6 +96,7 @@ class M3AgentModel(AsyncOpenAIChat):
             graph_dir=str(self.graph_dir), build_memory=parse_bool(m3agent_build_memory),
             memorization_model=m3agent_memorization_model,
             voice_backend=m3agent_voice_backend, asr_model=m3agent_asr_model, asr_device=m3agent_asr_device,
+            face_device=m3agent_face_device,
             embed_base_url=m3agent_embed_base_url, embed_model=m3agent_embed_model,
             embed_api_key=m3agent_embed_api_key, reembed=reembed,
             segment_seconds=int(m3agent_segment_seconds), attn_implementation=m3agent_attn_implementation,
@@ -129,11 +133,18 @@ class M3AgentModel(AsyncOpenAIChat):
             raise ValueError("M3-Agent needs a video message or a memory graph path")
         # Use the task's complete prompt, including choices, subtitles and answer
         # formatting. Reading doc['question'] alone loses that task information.
-        answer = await self.adapter.query(
-            self.client, self.model_version, question, video_path=video_path,
-            before_clip=doc.get("before_clip"), generation_kwargs=dict(generation_kwargs or {}),
-            total_round=self.rounds, topk=self.topk, threshold=self.threshold, **memory,
-        )
+        try:
+            answer = await self.adapter.query(
+                self.client, self.model_version, question, video_path=video_path,
+                before_clip=doc.get("before_clip"), generation_kwargs=dict(generation_kwargs or {}),
+                total_round=self.rounds, topk=self.topk, threshold=self.threshold, **memory,
+            )
+        except self.adapter.preparation_error as exc:
+            # An unrecoverable graph failure affects this source only. The
+            # adapter keeps the worker available for other videos; do not retry
+            # preparation or cancel their pending questions.
+            eval_logger.warning(f"M3-Agent request {idx} returned an empty answer after graph preparation failed: {exc}")
+            answer = ""
         return answer, idx, None
 
     def clean(self):

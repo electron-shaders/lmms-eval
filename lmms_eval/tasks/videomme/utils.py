@@ -227,7 +227,7 @@ def videomme_doc_to_text_subtitle(doc, lmms_eval_specific_kwargs=None):
                     for idx, title in enumerate(subtitle_by_frame):
                         if frame_idx < title[1] and frame_idx >= title[0]:
                             subtitle_by_frame_idx.append(idx)
-                subtitle_by_frame_idx = list(set(subtitle_by_frame_idx))
+                subtitle_by_frame_idx = sorted(set(subtitle_by_frame_idx))
 
                 textlist = []
                 for idx in subtitle_by_frame_idx:

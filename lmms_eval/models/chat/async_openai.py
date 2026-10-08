@@ -403,7 +403,7 @@ class AsyncOpenAIChat(lmms):
                         if attempt == self.max_retries - 1:
                             eval_logger.error(f"All {self.max_retries} attempts failed. Last error: {error_msg}")
                             if self.fail_on_request_error:
-                                raise RuntimeError(f"Evaluation aborted: request {idx} failed after {self.max_retries} attempts: {error_msg}") from exc
+                                raise FatalEvaluationError(f"Evaluation aborted: request {idx} failed after {self.max_retries} attempts: {error_msg}") from exc
                         else:
                             await asyncio.sleep(self.retry_backoff_s)
 
