@@ -505,16 +505,12 @@ class PlaybackModel(AsyncOpenAIChat):
                         entry["result"] = {"answer": submitted, "accepted": True}
                         if key != "answer":
                             entry["result"]["argument_corrections"] = [{"argument": key, "applied": "answer", "reason": "answer field capitalization"}]
-                        entry["warning"] = "Final answer accepted from an answer tool call."
                     except ToolInputError as exc:
                         failure, submitted = str(exc), ""
                         entry["result"] = tool_error_result(exc, entry)
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(entry["result"])})
             if failure:
                 save_error(failure, "tool_error")
-            else:
-                eval_logger.warning("Playback request {}: accepted final answer from answer tool; details: {}", idx, error_log)
-                save_error("Final answer accepted from answer tool", "answer_tool")
             return raw, submitted, failure
 
         try:
