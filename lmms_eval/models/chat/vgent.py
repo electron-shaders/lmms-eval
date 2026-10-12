@@ -30,22 +30,26 @@ Environment variables
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import hashlib
+import json
 import os
 import sys
+
+from loguru import logger as eval_logger
 
 from lmms_eval.api.instance import Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.models.chat.async_openai import AsyncOpenAIChat
-from loguru import logger as eval_logger
 
 # ---------------------------------------------------------------------------
 # Lazy Vgent import helper
 # ---------------------------------------------------------------------------
 
 _vgent_loaded: bool = False
-_run_vgent_query = None        # callable(video_id, query, video_path, output_dir, question, candidates, doc, subtitle_path, model_name, task) -> str
-_init_vgent_instance = None    # callable(model_name, task, openai_client, model_version) -> None
+_run_vgent_query = None  # callable(video_id, query, video_path, output_dir, question, candidates, doc, subtitle_path, model_name, task) -> str
+_init_vgent_instance = None  # callable(model_name, task, openai_client, model_version) -> None
 _shutdown_vgent_instance = None
 _cancel_vgent_instance = None
 
@@ -84,16 +88,14 @@ def _load_vgent(vgent_path: str | None) -> bool:
         return True
     except ImportError as exc:
         _vgent_loaded = True
-        eval_logger.warning(
-            f"[Vgent] Could not import vgent_adapter ({exc}). "
-            "Set VGENT_PATH or pass vgent_path=<dir> in --model_args."
-        )
+        eval_logger.warning(f"[Vgent] Could not import vgent_adapter ({exc}). " "Set VGENT_PATH or pass vgent_path=<dir> in --model_args.")
         return False
 
 
 # ---------------------------------------------------------------------------
 # Helper: extract fields from raw messages or doc
 # ---------------------------------------------------------------------------
+
 
 def _extract_video_path(raw_messages: list[dict]) -> str:
     """Return the video path from the *first* user message, or empty string."""
@@ -132,29 +134,59 @@ def _extract_candidates(doc: dict) -> list[str] | None:
     candidates = doc.get("options") or doc.get("candidates") or doc.get("choices")
     if candidates is None:
         return None
-    return list(candidates)
+    if isinstance(candidates, str):
+        if candidates.strip() in ("", "None", "null"):
+            return []
+        # InfiniBench stores Python literals, including lists of actions.
+        candidates = ast.literal_eval(candidates)
+    if not isinstance(candidates, (list, tuple)):
+        raise ValueError("Vgent answer options must be a list or a serialized list")
+    return [option if isinstance(option, str) else json.dumps(option, ensure_ascii=False) for option in candidates]
 
 
 # ---------------------------------------------------------------------------
 # Helper: resolve video ID for a document
 # ---------------------------------------------------------------------------
 
+
 def _resolve_video_id(
     doc: dict,
+    video_path: str = "",
 ) -> str | None:
-    video_id = (
-        doc.get("videoID")
-        or doc.get("video_id")
-        or doc.get("video")
-        or doc.get("id")
-        or ""
-    )
-    if not video_id:
-        return None
+    video_id = doc.get("videoID") or doc.get("video_id") or doc.get("video")
+    if video_id and os.path.basename(str(video_id)) == str(video_id):
+        # Keep existing VideoMME graph directories reusable.
+        return os.path.splitext(str(video_id))[0]
 
-    video_id = os.path.splitext(str(video_id))[0]
+    source = video_id or doc.get("video_path_mp4") or doc.get("video_path") or video_path
+    if source:
+        source = os.path.normpath(os.fspath(source))
+        # InfiniBench can have episode_1.mp4 in several shows/seasons. The
+        # relative dataset path groups questions without colliding by basename
+        # or allowing an absolute video path to escape the graph directory.
+        stem = os.path.splitext(os.path.basename(source))[0]
+        digest = hashlib.sha256(source.encode()).hexdigest()[:16]
+        return f"{stem}_{digest}"
 
-    return video_id
+    video_id = doc.get("id")
+    return os.path.splitext(os.path.basename(str(video_id)))[0] if video_id else None
+
+
+def _resolve_subtitle_path(doc: dict, video_path: str, video_id: str) -> str | None:
+    subtitle = doc.get("video_subtitles") or doc.get("subtitle_path")
+    if subtitle:
+        if os.path.isabs(subtitle):
+            return subtitle
+        source = doc.get("video_path_mp4")
+        if source and not os.path.isabs(source):
+            # Use the already-resolved video to honor the task's data_dir,
+            # including per-split extraction directories.
+            relative = os.path.relpath(subtitle, os.path.dirname(source))
+            return os.path.normpath(os.path.join(os.path.dirname(video_path), relative))
+        return os.path.join(os.path.dirname(video_path), subtitle)
+    if video_path:
+        return os.path.join(os.path.dirname(os.path.dirname(video_path)), "subtitle", f"{video_id}.srt")
+    return None
 
 
 VGENT_MODEL_ID = {
@@ -177,6 +209,7 @@ VGENT_MODEL_ID = {
 # ---------------------------------------------------------------------------
 # Vgent model class
 # ---------------------------------------------------------------------------
+
 
 @register_model("vgent")
 class VgentModel(AsyncOpenAIChat):
@@ -228,10 +261,7 @@ class VgentModel(AsyncOpenAIChat):
         # For Vgent, BATCH_SIZE is the overall concurrent model API request budget.
         self.num_cpus = self.batch_size_per_gpu
         if self.adaptive_concurrency:
-            eval_logger.warning(
-                "[Vgent] adaptive_concurrency is disabled; --batch_size is the "
-                "sole concurrency limit."
-            )
+            eval_logger.warning("[Vgent] adaptive_concurrency is disabled; --batch_size is the " "sole concurrency limit.")
         self.adaptive_concurrency = False
         # Vgent groups requests by video to share decoded frames and JIT graph
         # work, so the base backend's prompt-prefix reordering must stay off.
@@ -245,18 +275,10 @@ class VgentModel(AsyncOpenAIChat):
         vgent_available = _load_vgent(vgent_path or os.environ.get("VGENT_PATH", ""))
 
         if not vgent_available:
-            raise ImportError(
-                "[Vgent] Could not import vgent_adapter.run_vgent_query.\n"
-                "Make sure VGENT_PATH (or vgent_path=) points to the Vgent repo root\n"
-                "and that vgent_adapter.py exists there."
-            )
+            raise ImportError("[Vgent] Could not import vgent_adapter.run_vgent_query.\n" "Make sure VGENT_PATH (or vgent_path=) points to the Vgent repo root\n" "and that vgent_adapter.py exists there.")
 
         if not self.vgent_graph_dir:
-            raise ValueError(
-                "[Vgent] vgent_graph_dir is required but was not set.\n"
-                "Pass it via --model_args: vgent_graph_dir=/path/to/graphs\n"
-                "or export VGENT_GRAPH_DIR=/path/to/graphs before running."
-            )
+            raise ValueError("[Vgent] vgent_graph_dir is required but was not set.\n" "Pass it via --model_args: vgent_graph_dir=/path/to/graphs\n" "or export VGENT_GRAPH_DIR=/path/to/graphs before running.")
 
         # Pre-initialize Vgent on the main thread before any coroutines run.
         # This avoids loguru thread-safety issues and ensures the singleton
@@ -358,14 +380,15 @@ class VgentModel(AsyncOpenAIChat):
         user_text = _extract_user_text(raw_messages)
         question = _extract_question(doc) or user_text
         candidates = _extract_candidates(doc) or []
-        doc["letters"] = [chr(ord("A") + i) for i in range(len(candidates))]
-        video_id = _resolve_video_id(doc)
         video_path = _extract_video_path(raw_messages)
-        if video_path:
-            doc["video_path"] = video_path
-            subtitle_path = os.path.join(os.path.dirname(os.path.dirname(video_path)), "subtitle", f"{video_id}.srt")
-        else:
-            subtitle_path = None
+        video_id = _resolve_video_id(doc, video_path)
+        if video_id is None:
+            raise ValueError(f"[Vgent] Cannot resolve a video for task {task!r}")
+        subtitle_path = _resolve_subtitle_path(doc, video_path, video_id)
+        # Vgent's aggregation expects canonical fields, while task documents
+        # use options/choices and may be shared by concurrent requests.
+        doc = dict(doc, question=question, candidates=candidates, video_path=video_path)
+        doc["letters"] = [str(i) if task.startswith("infinibench_") else chr(ord("A") + i) for i in range(len(candidates))]
 
         output_dir = os.path.join(
             self.vgent_graph_dir,
@@ -389,10 +412,7 @@ class VgentModel(AsyncOpenAIChat):
                 return_raw_response=True,
             )
         except Exception as exc:
-            raise RuntimeError(
-                f"[Vgent] run_vgent_query failed for video '{video_id}'.\n"
-                f"Underlying error: {exc}"
-            ) from exc
+            raise RuntimeError(f"[Vgent] run_vgent_query failed for video '{video_id}'.\n" f"Underlying error: {exc}") from exc
 
         return resp
 
