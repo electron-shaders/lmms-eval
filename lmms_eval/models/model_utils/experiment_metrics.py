@@ -18,7 +18,12 @@ _WORKLOAD_SAMPLES = 0
 _ADDITIVE_FIELDS = (
     "input_tokens",
     "output_tokens",
+    "total_tokens",
     "reasoning_tokens",
+    "non_reasoning_output_tokens",
+    "cached_input_tokens",
+    "uncached_input_tokens",
+    "cache_creation_input_tokens",
     "visual_tokens",
     "decoded_frames",
     "selected_frames",

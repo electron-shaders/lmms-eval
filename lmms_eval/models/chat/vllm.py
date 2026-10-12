@@ -3,14 +3,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
-from lmms_eval.api.instance import GenerationResult, Instance, TokenCounts
+from tqdm import tqdm
+
+from lmms_eval.api.instance import GenerationResult, Instance
 from lmms_eval.api.registry import register_model
 from lmms_eval.imports import optional_import
 from lmms_eval.models.model_utils.gen_metrics import log_metrics
 from lmms_eval.models.model_utils.vllm_chat import chat_with_template_groups
+from lmms_eval.models.model_utils.vllm_usage import VLLMUsageRecorder
 from lmms_eval.models.simple.vllm import VLLM as VLLMSimple
 from lmms_eval.protocol import ChatMessages
-from tqdm import tqdm
 
 LLM, _ = optional_import("vllm", "LLM")
 SamplingParams, _ = optional_import("vllm", "SamplingParams")
@@ -55,6 +57,7 @@ class VLLM(VLLMSimple):
         self.fps = fps
         self.max_pixels = max_pixels
         self.nframes = nframes
+        self._usage_recorder = VLLMUsageRecorder(self.client, reasoning_parser=kwargs.get("reasoning_parser"))
 
     def make_one_request(self, request: Instance) -> Tuple[list[dict], dict]:
         """
@@ -90,7 +93,6 @@ class VLLM(VLLMSimple):
         batch_size = self.batch_size_per_gpu
         batched_requests = [requests[i : i + batch_size] for i in range(0, len(requests), batch_size)]
         total_elapsed_time = 0
-        sample_token_counts: Optional[TokenCounts] = None
         for batch_requests in batched_requests:
             batched_messages = []
             batched_sampling_params = []
@@ -106,18 +108,18 @@ class VLLM(VLLMSimple):
 
             start_time = time.time()
 
-            def _run_chat(request_items: list[tuple[list[dict], dict, dict]]) -> list[str]:
+            def _run_chat(request_items: list[tuple[list[dict], dict, dict]]) -> list[GenerationResult]:
                 response = chat_with_template_groups(self.client, request_items, SamplingParams, chat_template=self.chat_template)
-                return [o.outputs[0].text for o in response]
+                return [self._usage_recorder.record(output, options) for output, (_, _, options) in zip(response, request_items)]
 
-            response_text = self._run_tp_synced(list(zip(batched_messages, batched_sampling_params, batched_template_options)), _run_chat)
+            batch_results = self._run_tp_synced(list(zip(batched_messages, batched_sampling_params, batched_template_options)), _run_chat)
             end_time = time.time()
 
             # Calculate timing metrics for batch
             total_elapsed_time += end_time - start_time
 
-            assert len(response_text) == len(batch_requests)
-            res.extend([GenerationResult(text=resp_text, token_counts=sample_token_counts) for resp_text in response_text])
+            assert len(batch_results) == len(batch_requests)
+            res.extend(batch_results)
             pbar.update(len(batch_requests))
 
         if not self.disable_log_stats:
