@@ -15,24 +15,40 @@ from urllib.parse import urlparse
 from lmms_eval.api.exceptions import FatalEvaluationError
 from lmms_eval.api.instance import TokenCounts
 from lmms_eval.api.registry import register_model
-from lmms_eval.models.chat.async_openai import AsyncOpenAIChat, _format_request_exception
+from lmms_eval.models.chat.async_openai import (
+    AsyncOpenAIChat,
+    _format_request_exception,
+)
 from lmms_eval.models.model_utils.concurrency_control import parse_bool
 from lmms_eval.models.model_utils.playback_answers import final_answer_text
-from lmms_eval.models.model_utils.playback_error_log import response_snapshot, write_error_log
+from lmms_eval.models.model_utils.playback_error_log import (
+    response_snapshot,
+    write_error_log,
+)
 from lmms_eval.models.model_utils.playback_mcq import explicit_choice, requested_choices
 from lmms_eval.models.model_utils.qwen35_sampling import openai_generation_kwargs
 from lmms_eval.models.model_utils.usage_metrics import log_usage
 from loguru import logger as eval_logger
 
+from playback.inference.entity_chain import (
+    CHAIN_DESCRIPTION,
+    CHAIN_SCHEMA,
+    CONTEXT_DIRECTION_SCHEMA,
+    CONTEXT_SECONDS_SCHEMA,
+    SEMANTIC_DESCRIPTION,
+)
+from playback.inference.entity_chain import TOOL_NAME as CHAIN_TOOL
+from playback.inference.entity_chain import validate_chain
+
 SYSTEM_PROMPT = """Answer the user's video question using the Playback tools and any supplied subtitles.
 Call clip directly to inspect any video intervals in seconds, including as your first tool call.
 Clipping does not require indexing or retrieval, and its intervals are not restricted to retrieval results.
-To search the video, call retrieve_video; it automatically indexes the video if needed and waits until ready.
+{retrieval_routing}
 index_video returns a video_serial such as video_1. Reuse that serial as video in subsequent tools.
 video_info gives the source duration or recorded ranges without indexing; index_status reports index progress.
 You may also call index_video explicitly. Indexing consumes one tool call, including automatic indexing.
 Describe only one single target entity per query for retrieve_video, which returns candidate timestamp intervals.
-Use separate retrieve_video calls to search for different target entities.
+{separate_queries}
 Search matches are candidates, not proof that an entity or event appears. Inspect the returned clips to verify them.
 Neither an empty search nor a candidate's rank proves absence or first/second/last occurrence.
 Use source timestamps and inspect relevant intervals when answering temporal-order or absence questions.
@@ -49,6 +65,16 @@ Your total allowance is {agent_calls} model calls, including retries and the fin
 Each clip call samples frames at {fps} FPS across the interval. You may optionally set max_frames
 to sample fewer frames uniformly over the whole interval. There is no cumulative frame budget.
 Only the video supplied in this question is available in this session."""
+
+ENTITY_CHAIN_ROUTING = """Before retrieval, decide whether only semantic closeness matters or temporal relations/occurrence order also matter.
+Use retrieve_video only when semantic closeness alone determines relevance and temporal relations do not matter.
+For temporal constraints such as before, after, during, overlapping, or first/second/nth occurrence, use retrieve_video_by_entity_chain.
+Interpret the meaning, not just keywords: 'first encounter' is temporal; 'first lady' is not.
+Describe each entity/event without its temporal operators; express those in relation and occurrence fields.
+relation describes the current node relative to the preceding node; omit it on the first node.
+For an unknown event after/before an anchor, set context_direction and adjust context_seconds (default 30).
+Ordinal hypotheses are provisional and ranked by semantic match, then timestamps; inspect the returned witnesses with clip.
+You may clip within or beyond candidate timestamps. Returned windows never restrict clipping."""
 
 
 class ToolInputError(ValueError):
@@ -136,6 +162,7 @@ class PlaybackModel(AsyncOpenAIChat):
         playback_tool_timeout=600,
         playback_enable_thinking=True,
         playback_force_index=False,
+        playback_entity_chain=None,
         playback_subtitle_mapping=None,
         playback_empty_response_retries=None,
         playback_error_log=None,
@@ -157,6 +184,7 @@ class PlaybackModel(AsyncOpenAIChat):
             raise ValueError("Playback FPS and timeouts must be finite and positive")
         self.enable_thinking = parse_bool(playback_enable_thinking)
         self.force_index = parse_bool(playback_force_index)
+        self.entity_chain = parse_bool(os.getenv("PLAYBACK_ENTITY_CHAIN", "True") if playback_entity_chain is None else playback_entity_chain)
         self.subtitle_mapping = playback_subtitle_mapping
         retries = os.getenv("PLAYBACK_EMPTY_RESPONSE_RETRIES", "2") if playback_empty_response_retries is None else playback_empty_response_retries
         self.empty_response_retries = _integer(retries, "playback_empty_response_retries", 0)
@@ -190,8 +218,11 @@ class PlaybackModel(AsyncOpenAIChat):
         async with MCPClient(server_url=self.playback_mcp_url, timeout=self.tool_timeout) as client:
             functions = await client.get_function_list()
             required = {"index_video", "retrieve_video", "clip", "index_status", "stop_indexing", "video_info", "create_session", "close_session"}
-            if not required <= {item["function"]["name"] for item in functions}:
-                raise RuntimeError("The MCP endpoint does not provide the required Playback tools")
+            if getattr(self, "entity_chain", True):
+                required.add(CHAIN_TOOL)
+            missing = required - {item["function"]["name"] for item in functions}
+            if missing:
+                raise RuntimeError(f"The MCP endpoint is missing required Playback tools: {', '.join(sorted(missing))}. Restart the server with the matching Playback implementation.")
             async with PlaybackMCPClient(await client.connect()) as memory:
                 yield memory
 
@@ -204,7 +235,11 @@ class PlaybackModel(AsyncOpenAIChat):
             ("video_info", "Read video duration or available recorded intervals without indexing or loading a model.", {"video": video_arg}, ["video"]),
             (
                 "retrieve_video",
-                "Describe only one single target entity per query to retrieve candidate [start, end] intervals in seconds. Use separate calls for different target entities. Automatically indexes if needed (one additional tool call). Verify candidates with clip.",
+                (
+                    SEMANTIC_DESCRIPTION + " Automatically indexes if needed (one additional tool call)."
+                    if getattr(self, "entity_chain", True)
+                    else "Describe only one single target entity per query to retrieve candidate [start, end] intervals in seconds. Use separate calls for different target entities. Automatically indexes if needed (one additional tool call). Verify candidates with clip."
+                ),
                 {
                     "video": video_arg,
                     "query": {
@@ -233,6 +268,22 @@ class PlaybackModel(AsyncOpenAIChat):
                 ["answer"],
             ),
         ]
+        if getattr(self, "entity_chain", True):
+            definitions.insert(
+                5,
+                (
+                    CHAIN_TOOL,
+                    CHAIN_DESCRIPTION + " Automatically indexes if needed (one additional tool call).",
+                    {
+                        "video": video_arg,
+                        "chain": CHAIN_SCHEMA,
+                        "context_direction": CONTEXT_DIRECTION_SCHEMA,
+                        "context_seconds": CONTEXT_SECONDS_SCHEMA,
+                        "max_retrived_clips": {"type": "integer", "minimum": 0, "maximum": self.max_retrived_clips, "default": self.max_retrived_clips},
+                    },
+                    ["video", "chain"],
+                ),
+            )
         return [
             {"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False}}}
             for name, description, properties, required in definitions
@@ -240,9 +291,15 @@ class PlaybackModel(AsyncOpenAIChat):
 
     async def _execute_tool(self, memory, name, arguments, state):
         from playback.inference.config import PlaybackToolError
-        from playback.inference.tool_inputs import brief, clip_interval_hint, normalize_video_reference
+        from playback.inference.tool_inputs import (
+            brief,
+            clip_interval_hint,
+            normalize_video_reference,
+        )
 
         allowed = {"index_video": {"video"}, "index_status": {"video"}, "stop_indexing": {"video"}, "video_info": {"video"}, "retrieve_video": {"video", "query", "max_retrived_clips"}, "clip": {"video", "intervals", "max_frames"}}
+        if getattr(self, "entity_chain", True):
+            allowed[CHAIN_TOOL] = {"video", "chain", "context_direction", "context_seconds", "max_retrived_clips"}
         if name not in allowed:
             raise ToolInputError(f"Unknown tool: {name}. Available tools are {', '.join(allowed)}, and answer. Submit your final answer with answer or a normal assistant reply in the requested format.")
         if not isinstance(arguments, dict) or set(arguments) - allowed[name]:
@@ -296,10 +353,19 @@ class PlaybackModel(AsyncOpenAIChat):
             state["memory_mode"] = status.get("memory_mode", "direct")
             remember_info(status)
             return status, []
-        if name == "retrieve_video":
-            query = arguments.get("query")
-            if not isinstance(query, str) or not query.strip():
-                raise ToolInputError(f"query={brief(query)} for video {video!r} must be a non-empty string describing one target entity, e.g. 'a person wearing a red jacket'.")
+        if name in ("retrieve_video", CHAIN_TOOL):
+            if name == CHAIN_TOOL:
+                direction, seconds = arguments.get("context_direction"), arguments.get("context_seconds", 30)
+                try:
+                    chain = validate_chain(arguments.get("chain"), direction, seconds, arguments.get("max_retrived_clips", self.max_retrived_clips))
+                except ValueError as exc:
+                    raise ToolInputError(str(exc)) from exc
+                retrieval_arguments = {"chain": chain, "context_direction": direction, "context_seconds": seconds}
+            else:
+                query = arguments.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    raise ToolInputError(f"query={brief(query)} for video {video!r} must be a non-empty string describing one target entity, e.g. 'a person wearing a red jacket'.")
+                retrieval_arguments = {"query": query}
             limit = arguments.get("max_retrived_clips", self.max_retrived_clips)
             if type(limit) is not int or limit < 0:
                 raise ToolInputError(f"max_retrived_clips={brief(limit)} must be a non-negative integer. Use 0..{self.max_retrived_clips}, or omit it for the default {self.max_retrived_clips}.")
@@ -314,7 +380,7 @@ class PlaybackModel(AsyncOpenAIChat):
                     raise ToolInputError(
                         f"Retrieval needs indexing plus search (two tool calls); only {max(0, self.max_tool_calls - len(trace) + 1)} of {self.max_tool_calls} calls remain. Use existing evidence or clip directly within that allowance."
                     )
-                entry = {"name": "index_video", "arguments": {"video": video}, "within_budget": True, "implicit": True, "trigger": "retrieve_video"}
+                entry = {"name": "index_video", "arguments": {"video": video}, "within_budget": True, "implicit": True, "trigger": name}
                 # The wrapper has already reserved the triggering retrieval.
                 trace.insert(max(0, len(trace) - 1), entry)
                 started = time.monotonic()
@@ -328,7 +394,7 @@ class PlaybackModel(AsyncOpenAIChat):
                 finally:
                     entry["duration_s"] = time.monotonic() - started
             async with asyncio.timeout(self.tool_timeout):
-                result = await memory.call_tool(name, {"video": video, "query": query, "max_retrived_clips": applied_limit})
+                result = await memory.call_tool(name, {"video": video, **retrieval_arguments, "max_retrived_clips": applied_limit})
             remember_info(result)
             result = {**result, "applied_max_retrived_clips": applied_limit}
             if corrections:
@@ -446,10 +512,10 @@ class PlaybackModel(AsyncOpenAIChat):
             entry["error"] = _format_request_exception(error)
             message = str(error) or f"{entry['name']} failed without an error message"
             if isinstance(error, TimeoutError):
-                limits = f"index wait {self.index_timeout:g}s, individual tool {self.tool_timeout:g}s" if entry["name"] in ("index_video", "retrieve_video") else f"individual tool {self.tool_timeout:g}s"
+                limits = f"index wait {self.index_timeout:g}s, individual tool {self.tool_timeout:g}s" if entry["name"] in ("index_video", "retrieve_video", CHAIN_TOOL) else f"individual tool {self.tool_timeout:g}s"
                 action = (
                     "Check index_status before retrying; indexing may still be active. You may inspect clips directly."
-                    if entry["name"] in ("index_video", "retrieve_video")
+                    if entry["name"] in ("index_video", "retrieve_video", CHAIN_TOOL)
                     else "Retry a shorter interval or use video_info to confirm available media." if entry["name"] == "clip" else "Retry the same request if the service is reachable."
                 )
                 message = f"{entry['name']} timed out for video {state.get('video_serial') or video!r} (configured limits: {limits}). {action} Calls recorded: {len(trace)}/{self.max_tool_calls}; answer from existing evidence if the allowance is exhausted."
@@ -519,7 +585,14 @@ class PlaybackModel(AsyncOpenAIChat):
             from playback.inference.subtitles import evaluation_subtitles
 
             subtitles = evaluation_subtitles(task, self.task_dict[task][split][doc_id], video, self.subtitle_mapping)
-            prompt = SYSTEM_PROMPT.format(rounds=min(self.max_rounds, agent_call_limit - 1), calls=self.max_tool_calls, agent_calls=agent_call_limit, fps=self.clip_fps)
+            entity_chain = getattr(self, "entity_chain", True)
+            routing = (
+                "Retrieval tools automatically index the video if needed and wait until ready.\n" + ENTITY_CHAIN_ROUTING
+                if entity_chain
+                else "To search the video, call retrieve_video; it automatically indexes the video if needed and waits until ready."
+            )
+            separate_queries = "For independent semantic-only searches, use separate retrieve_video calls for different target entities." if entity_chain else "Use separate retrieve_video calls to search for different target entities."
+            prompt = SYSTEM_PROMPT.format(rounds=min(self.max_rounds, agent_call_limit - 1), calls=self.max_tool_calls, agent_calls=agent_call_limit, fps=self.clip_fps, retrieval_routing=routing, separate_queries=separate_queries)
             messages.insert(0, {"role": "system", "content": (self.system_prompt + "\n\n" if self.system_prompt else "") + prompt})
             payload, tools = self._generation_payload(generation), self._tools(video)
             answer_tools = [tool for tool in tools if tool["function"]["name"] == "answer"]
@@ -547,7 +620,12 @@ class PlaybackModel(AsyncOpenAIChat):
                         save_error(entry["error"], "tool_error")
                         messages.append({"role": "user", "content": "Video indexing failed. You may retry index_video or inspect intervals directly with clip within the remaining tool budget."})
                     else:
-                        messages.append({"role": "user", "content": "Video indexed; search with retrieve_video or inspect any intervals directly with clip to answer the user’s query."})
+                        index_hint = (
+                            "Video indexed; choose the retrieval tool appropriate to the question or inspect any intervals directly with clip."
+                            if entity_chain
+                            else "Video indexed; search with retrieve_video or inspect any intervals directly with clip to answer the user’s query."
+                        )
+                        messages.append({"role": "user", "content": index_hint})
                 for round_idx in range(self.max_rounds + 1):
                     final_round = False
                     # Empty replies get a small, question-wide recovery budget.
@@ -651,6 +729,7 @@ class PlaybackModel(AsyncOpenAIChat):
                             "selection_mode": "playback_mixlora" if state.get("memory_mode") == "mixlora" else "playback_rqvae",
                             "memory_mode": state.get("memory_mode"),
                             "force_index": self.force_index,
+                            "entity_chain_enabled": getattr(self, "entity_chain", True),
                             "source_subtitle_segments": len(subtitles),
                             "video": video,
                             "video_serial": state.get("video_serial"),
