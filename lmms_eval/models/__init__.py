@@ -152,6 +152,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "vgent": "VgentModel",
     "dvd": "DVDModel",
     "videorag": "VideoRAGModel",
+    "vanilla_rag": "VanillaRAGModel",
     "m3agent": "M3AgentModel",
     "playback": "PlaybackModel",
 }
