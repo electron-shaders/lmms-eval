@@ -1,0 +1,16 @@
+task: minerva_ego
+tag: video_qa
+include: ../minerva/_default_template_yaml
+dataset_kwargs:
+  data_files:
+    test: https://github.com/google-deepmind/neptune/raw/refs/heads/main/minerva-ego_20260205.json
+doc_to_visual: !function utils.minerva_ego_doc_to_visual
+doc_to_messages: !function utils.minerva_ego_doc_to_messages
+process_results: !function utils.minerva_ego_process_results
+metric_list:
+  - metric: minerva_ego_acc
+    aggregation: !function utils.minerva_ego_aggregate_results
+    higher_is_better: true
+  - metric: minerva_ego_question_type_acc
+    aggregation: !function utils.minerva_ego_aggregate_question_type_results
+    higher_is_better: true
