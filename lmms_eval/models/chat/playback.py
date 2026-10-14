@@ -12,6 +12,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
+from loguru import logger as eval_logger
+from playback.inference.entity_chain import (
+    CHAIN_DESCRIPTION,
+    CHAIN_SCHEMA,
+    CONTEXT_DIRECTION_SCHEMA,
+    CONTEXT_SECONDS_SCHEMA,
+    SEMANTIC_DESCRIPTION,
+)
+from playback.inference.entity_chain import TOOL_NAME as CHAIN_TOOL
+from playback.inference.entity_chain import prepare_chain_arguments
+
 from lmms_eval.api.exceptions import FatalEvaluationError
 from lmms_eval.api.instance import TokenCounts
 from lmms_eval.api.registry import register_model
@@ -28,17 +39,6 @@ from lmms_eval.models.model_utils.playback_error_log import (
 from lmms_eval.models.model_utils.playback_mcq import explicit_choice, requested_choices
 from lmms_eval.models.model_utils.qwen35_sampling import openai_generation_kwargs
 from lmms_eval.models.model_utils.usage_metrics import log_usage
-from loguru import logger as eval_logger
-
-from playback.inference.entity_chain import (
-    CHAIN_DESCRIPTION,
-    CHAIN_SCHEMA,
-    CONTEXT_DIRECTION_SCHEMA,
-    CONTEXT_SECONDS_SCHEMA,
-    SEMANTIC_DESCRIPTION,
-)
-from playback.inference.entity_chain import TOOL_NAME as CHAIN_TOOL
-from playback.inference.entity_chain import validate_chain
 
 SYSTEM_PROMPT = """Answer the user's video question using the Playback tools and any supplied subtitles.
 Call clip directly to inspect any video intervals in seconds, including as your first tool call.
@@ -210,9 +210,9 @@ class PlaybackModel(AsyncOpenAIChat):
 
     @asynccontextmanager
     async def _memory_session(self):
-        from lmms_eval.mcp import MCPClient
-
         from playback.inference.client import PlaybackMCPClient
+
+        from lmms_eval.mcp import MCPClient
 
         # Each question owns both lifetimes, including when cancelled or retried.
         async with MCPClient(server_url=self.playback_mcp_url, timeout=self.tool_timeout) as client:
@@ -354,13 +354,12 @@ class PlaybackModel(AsyncOpenAIChat):
             remember_info(status)
             return status, []
         if name in ("retrieve_video", CHAIN_TOOL):
+            corrections = []
             if name == CHAIN_TOOL:
-                direction, seconds = arguments.get("context_direction"), arguments.get("context_seconds", 30)
                 try:
-                    chain = validate_chain(arguments.get("chain"), direction, seconds, arguments.get("max_retrived_clips", self.max_retrived_clips))
+                    retrieval_arguments, corrections = prepare_chain_arguments(arguments.get("chain"), arguments.get("context_direction"), arguments.get("context_seconds", 30), arguments.get("max_retrived_clips", self.max_retrived_clips))
                 except ValueError as exc:
                     raise ToolInputError(str(exc)) from exc
-                retrieval_arguments = {"chain": chain, "context_direction": direction, "context_seconds": seconds}
             else:
                 query = arguments.get("query")
                 if not isinstance(query, str) or not query.strip():
@@ -370,7 +369,6 @@ class PlaybackModel(AsyncOpenAIChat):
             if type(limit) is not int or limit < 0:
                 raise ToolInputError(f"max_retrived_clips={brief(limit)} must be a non-negative integer. Use 0..{self.max_retrived_clips}, or omit it for the default {self.max_retrived_clips}.")
             applied_limit = min(limit, self.max_retrived_clips)
-            corrections = []
             if limit != applied_limit:
                 corrections.append({"argument": "max_retrived_clips", "requested": limit, "applied": applied_limit, "reason": "configured retrieval limit"})
             index_result = None
@@ -398,7 +396,7 @@ class PlaybackModel(AsyncOpenAIChat):
             remember_info(result)
             result = {**result, "applied_max_retrived_clips": applied_limit}
             if corrections:
-                result["argument_corrections"] = corrections
+                result["argument_corrections"] = [*result.get("argument_corrections", []), *corrections]
             if index_result is not None:
                 result["automatic_index"] = index_result
             state["retrieved"].extend(result["intervals"])
