@@ -15,9 +15,9 @@ from lmms_eval.api.registry import register_model
 from lmms_eval.imports import optional_import
 from lmms_eval.models.model_utils.media_encoder import encode_image_to_base64
 from lmms_eval.models.model_utils.progress import make_progress
-from lmms_eval.models.model_utils.qwen35_sampling import (
-    is_qwen35_4b,
-    qwen35_generation_kwargs,
+from lmms_eval.models.model_utils.qwen35_38_sampling import (
+    is_qwen35,
+    qwen_generation_kwargs,
     thinking_enabled,
 )
 from lmms_eval.models.model_utils.vllm_chat import chat_with_template_groups
@@ -361,7 +361,7 @@ class VLLM(lmms):
         return top_p
 
     def _build_sampling_params_dict(self, gen_kwargs: dict[str, Any]) -> dict[str, Any]:
-        gen_kwargs = qwen35_generation_kwargs(getattr(self, "model", ""), gen_kwargs, enable_thinking=getattr(self, "enable_thinking", True))
+        gen_kwargs = qwen_generation_kwargs(getattr(self, "model", ""), gen_kwargs, enable_thinking=getattr(self, "enable_thinking", True))
         params = {
             "max_tokens": gen_kwargs["max_new_tokens"],
             "temperature": gen_kwargs["temperature"],
@@ -373,8 +373,8 @@ class VLLM(lmms):
         return params
 
     def _chat_template_options(self, gen_kwargs=None):
-        if is_qwen35_4b(getattr(self, "model", "")):
-            generation = qwen35_generation_kwargs(self.model, gen_kwargs, enable_thinking=getattr(self, "enable_thinking", True))
+        if is_qwen35(getattr(self, "model", "")):
+            generation = qwen_generation_kwargs(self.model, gen_kwargs, enable_thinking=getattr(self, "enable_thinking", True))
             return {"chat_template_kwargs": generation["extra_body"]["chat_template_kwargs"]}
         enable_thinking = (gen_kwargs or {}).get("enable_thinking", getattr(self, "enable_thinking", None))
         if enable_thinking is not None:

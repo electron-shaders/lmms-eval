@@ -31,7 +31,7 @@ from lmms_eval.models.model_utils.usage_metrics import (
     is_budget_exceeded,
     log_usage,
 )
-from lmms_eval.models.model_utils.qwen35_sampling import openai_generation_kwargs, thinking_enabled
+from lmms_eval.models.model_utils.qwen35_38_sampling import openai_generation_kwargs, thinking_enabled
 from lmms_eval.protocol import ChatMessages
 
 VideoReader, _ = optional_import("decord", "VideoReader")

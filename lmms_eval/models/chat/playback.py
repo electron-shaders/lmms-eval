@@ -37,7 +37,7 @@ from lmms_eval.models.model_utils.playback_error_log import (
     write_error_log,
 )
 from lmms_eval.models.model_utils.playback_mcq import explicit_choice, requested_choices
-from lmms_eval.models.model_utils.qwen35_sampling import openai_generation_kwargs
+from lmms_eval.models.model_utils.qwen35_38_sampling import openai_generation_kwargs
 from lmms_eval.models.model_utils.usage_metrics import log_usage
 
 SYSTEM_PROMPT = """Answer the user's video question using the Playback tools and any supplied subtitles.
