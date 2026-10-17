@@ -27,13 +27,13 @@ def positive(value, name, *, integer=False):
 
 
 def read_window(*args, **kwargs):
-    from playback.inference.media import read_window as read
+    from .media import read_window as read
 
     return read(*args, **kwargs)
 
 
 def probe(path):
-    from playback.inference.media import probe as inspect
+    from .media import probe as inspect
 
     return inspect(path)
 
@@ -143,7 +143,7 @@ class VideoRetriever:
             "max_soft_tokens": 140,
             "video_prompt": "",
             "add_timestamps": False,
-            "sampler": "playback.read_window.v1",
+            "sampler": "vanilla_rag.read_window.v1",
         }
         serialized = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         key = hashlib.sha256(serialized.encode()).hexdigest()

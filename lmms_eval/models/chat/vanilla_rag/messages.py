@@ -6,6 +6,7 @@ import copy
 import re
 
 from .core import VideoSource, positive, read_window
+from .native_video import VIDEO_BACKEND
 
 
 def task_inputs(messages, doc, query_field="question"):
@@ -31,7 +32,8 @@ def task_inputs(messages, doc, query_field="question"):
 
 def evidence_messages(messages, source, selected, *, fps=1, longest_edge=448):
     import torch
-    from playback.inference.native_video import encode_clip_video
+
+    from .native_video import encode_clip_video
 
     fps = positive(fps, "rag_clip_fps")
     longest_edge = positive(longest_edge, "rag_clip_longest_edge", integer=True)
@@ -96,7 +98,7 @@ def generation_payload(model, generation=None, *, enable_thinking=True, max_toke
         "repetition_penalty": 1.0,
         "seed": int(seed),
         "chat_template_kwargs": {"enable_thinking": enabled},
-        "media_io_kwargs": {"video": {"video_backend": "playback_clip", "num_frames": -1}},
+        "media_io_kwargs": {"video": {"video_backend": VIDEO_BACKEND, "num_frames": -1}},
         "mm_processor_kwargs": {"do_sample_frames": False},
     }
     result = {"model": model, "max_tokens": positive(max_tokens, "rag_max_new_tokens", integer=True), "temperature": 1.0 if enabled else 0.7, "top_p": 0.95 if enabled else 0.8, "presence_penalty": presence, "extra_body": extra}

@@ -35,9 +35,10 @@ def main():
             from .encoder import check_dependencies
 
             check_dependencies()
-        from playback.inference.native_video import encode_clip_video  # noqa: F401
-
         from lmms_eval.models.chat.vanilla_rag import VanillaRAGModel  # noqa: F401
+
+        from .media import probe, read_window  # noqa: F401
+        from .native_video import encode_clip_video  # noqa: F401
 
         print(f"vanilla_rag {args.selection} evaluator dependencies are ready")
 
