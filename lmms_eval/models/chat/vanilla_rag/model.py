@@ -39,12 +39,12 @@ class VanillaRAGModel(AsyncOpenAIChat):
         rag_vlm_revision=None,
         **kwargs,
     ):
-        from playback.baselines.vanilla_rag.core import VideoRetriever, positive
-        from playback.baselines.vanilla_rag.encoder import (
+        from .core import VideoRetriever, positive
+        from .encoder import (
             EmbeddingGemmaEncoder,
             check_dependencies,
         )
-        from playback.baselines.vanilla_rag.messages import generation_payload
+        from .messages import generation_payload
 
         if rag_selection not in ("dense", "uniform"):
             raise ValueError("rag_selection must be dense or uniform")
@@ -85,7 +85,7 @@ class VanillaRAGModel(AsyncOpenAIChat):
         raise NotImplementedError("vanilla_rag supports single-turn generate_until video tasks")
 
     def _prepare(self, raw_messages, doc):
-        from playback.baselines.vanilla_rag.messages import (
+        from .messages import (
             evidence_messages,
             task_inputs,
         )
@@ -115,7 +115,7 @@ class VanillaRAGModel(AsyncOpenAIChat):
                 stream.write(json.dumps(trace, ensure_ascii=False, allow_nan=False) + "\n")
 
     async def maybe_forward_with_tool(self, request, idx):
-        from playback.baselines.vanilla_rag.messages import (
+        from .messages import (
             apply_answer_stops,
             generation_payload,
             task_stops,
