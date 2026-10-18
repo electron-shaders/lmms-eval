@@ -243,7 +243,7 @@ class VLLM(lmms):
             gpu_memory_utilization=gpu_memory_utilization,
             trust_remote_code=trust_remote_code,
             disable_log_stats=disable_log_stats,
-            seed=1,
+            seed=int(kwargs.pop("seed", 1)),
             **kwargs,
         )
         self.disable_log_stats = disable_log_stats
