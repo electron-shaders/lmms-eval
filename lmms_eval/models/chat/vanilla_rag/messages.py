@@ -84,12 +84,12 @@ def generation_payload(model, generation=None, *, enable_thinking=True, max_toke
     """Apply explicit experiment settings over short/greedy task YAML defaults."""
     enabled = thinking(enable_thinking)
     generation = copy.deepcopy(generation or {})
-    if re.search(r"qwen3[._-]?5[-_]9b(?:$|[^a-z0-9])", model.lower()):
+    if re.search(r"qwen3[._-]?5[-_](?:4|9)b(?:$|[^a-z0-9])", model.lower()):
         presence = 1.5
     elif re.search(r"qwen3[._-]?8[-_]27b(?:$|[^a-z0-9])", model.lower()):
         presence = 0.0 if enabled else 1.5
     else:
-        raise ValueError("vanilla_rag generation presets support Qwen3.5-9B and Qwen3.8-27B (including local paths containing those names)")
+        raise ValueError("vanilla_rag generation presets support Qwen3.5-4B, Qwen3.5-9B, and Qwen3.8-27B (including local paths containing those names)")
     # Only explicitly supported generation controls are forwarded. In particular,
     # inherited thinking caps and media resampling must not alter the experiment.
     extra = {

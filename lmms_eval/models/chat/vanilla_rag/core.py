@@ -73,12 +73,15 @@ def chunk_intervals(source, seconds):
     return np.asarray([(start, min(start + step, source.end_us)) for start in range(source.start_us, source.end_us, step)], dtype=np.int64)
 
 
-def normalized(vectors, *, rows=None):
-    vectors = np.asarray(vectors, dtype=np.float32)
+def normalized(vectors, *, rows=None, device=None):
+    """Validate and L2-normalize FP32 embeddings on their retrieval device."""
+    import torch
+
+    vectors = torch.as_tensor(vectors, dtype=torch.float32, device=device).detach()
     if vectors.ndim != 2 or vectors.shape[1] != 768 or (rows is not None and len(vectors) != rows):
         raise ValueError("EmbeddingGemma must produce one 768-dimensional vector per input")
-    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    if not np.isfinite(vectors).all() or not np.isfinite(norms).all() or np.any(norms <= 0):
+    norms = torch.linalg.vector_norm(vectors, dim=1, keepdim=True)
+    if not (torch.isfinite(vectors).all() & torch.isfinite(norms).all() & (norms > 0).all()).item():
         raise ValueError("EmbeddingGemma returned nonfinite or zero embeddings")
     return vectors / norms
 
@@ -91,8 +94,20 @@ def select_chunks(intervals, top_k, *, vectors=None, query=None):
         indices = np.linspace(0, len(intervals) - 1, count).round().astype(int)
         scores = None
     else:
-        scores = normalized(vectors, rows=len(intervals)) @ normalized(query, rows=1)[0]
-        indices = np.lexsort((intervals[:, 0], -scores))[:count]
+        import torch
+
+        vectors = normalized(vectors, rows=len(intervals))
+        query = normalized(query, rows=1, device=vectors.device)
+        scores = torch.mv(vectors, query[0])
+        starts = torch.as_tensor(intervals[:, 0], device=vectors.device)
+        chronological = torch.argsort(starts, stable=True)
+        # torch.topk does not define tie order. Stable device-side sorting
+        # preserves the existing preference for earlier intervals at ties.
+        indices = chronological[torch.argsort(scores[chronological], descending=True, stable=True)[:count]]
+        selected_scores = scores[indices].tolist()
+        # Only the selected IDs/scores leave the device for trace formatting.
+        indices = indices.tolist()
+        scores = dict(zip(indices, selected_scores))
     ranks = {int(index): rank + 1 for rank, index in enumerate(indices)}
     return [{"chunk_id": int(i), "interval": [float(t) / 1e6 for t in intervals[i]], "rank": ranks[int(i)], "score": None if scores is None else float(scores[i])} for i in sorted(indices, key=lambda i: intervals[i, 0])]
 
@@ -127,6 +142,8 @@ class VideoRetriever:
             raise ValueError("rag_embed_max_frames must be <= 56 at the fixed 140-token frame budget")
 
     def _index(self, source, intervals):
+        import torch
+
         started = time.monotonic()
         signature = file_signature(source.path)
         profile = self.encoder.profile()
@@ -163,7 +180,7 @@ class VideoRetriever:
                     with target.open("rb") as archive, np.load(archive, allow_pickle=False) as saved:
                         if str(saved["manifest"]) != serialized or not np.array_equal(saved["intervals"], intervals):
                             raise ValueError("Index metadata mismatch")
-                        vectors = np.asarray(saved["vectors"], dtype=np.float32)
+                        vectors = torch.as_tensor(np.asarray(saved["vectors"], dtype=np.float32), device=self.encoder.device)
                         # Validate without another rounding step: cold and warm
                         # queries must score the same stored vector bytes.
                         normalized(vectors, rows=len(intervals))
@@ -180,15 +197,17 @@ class VideoRetriever:
                 if self.cancelled.is_set():
                     raise RuntimeError("Video indexing cancelled")
                 frames = [read_window(source.path, int(start), int(end), fps=self.embed_fps, max_frames=self.embed_max_frames, longest_edge=768)[0] for start, end in intervals[offset : offset + self.embed_batch_size]]
-                batches.append(normalized(self.encoder.encode_videos(frames), rows=len(frames)))
-            vectors = np.concatenate(batches)
+                batches.append(normalized(self.encoder.encode_videos(frames), rows=len(frames), device=self.encoder.device))
+            vectors = torch.cat(batches)
             if file_signature(source.path) != signature:
                 raise RuntimeError("Source video changed while indexing")
             temporary = None
             try:
                 with tempfile.NamedTemporaryFile(dir=self.cache_dir, prefix=f".{key}.", suffix=".tmp", delete=False) as output:
                     temporary = Path(output.name)
-                    np.savez(output, manifest=serialized, intervals=intervals, vectors=vectors)
+                    # Keep the portable FP32 NPZ cache; ranking uses the tensor
+                    # retained on the embedding device, including on cache hits.
+                    np.savez(output, manifest=serialized, intervals=intervals, vectors=vectors.cpu().numpy())
                     output.flush()
                     os.fsync(output.fileno())
                 os.replace(temporary, target)
@@ -213,6 +232,7 @@ class VideoRetriever:
         search_start = time.monotonic()
         if selection == "dense":
             query = self.encoder.encode_query(question)
+            trace["search_device"] = str(vectors.device)
         selected = select_chunks(intervals, top_k, vectors=vectors, query=query)
         trace.update(search_s=time.monotonic() - search_start, selected=selected, source=source.path, bounds=[source.start_us / 1e6, source.end_us / 1e6])
         return selected, trace

@@ -97,7 +97,7 @@ class EmbeddingGemmaEncoder:
             # Reject an oversized question instead of silently changing retrieval.
             if len(self._model.tokenizer(self._model.prompts["query"] + question)["input_ids"]) > 8192:
                 raise ValueError("Retrieval question exceeds EmbeddingGemma's 8192-token input limit")
-            return normalized(self._model.encode_query([question], convert_to_numpy=True, show_progress_bar=False), rows=1)
+            return normalized(self._model.encode_query([question], convert_to_tensor=True, convert_to_numpy=False, show_progress_bar=False), rows=1, device=self.device)
 
     def encode_videos(self, frames):
         with self._lock:
@@ -107,11 +107,12 @@ class EmbeddingGemmaEncoder:
             result = self._model.encode(
                 [{"video": video} for video in frames],
                 batch_size=len(frames),
-                convert_to_numpy=True,
+                convert_to_tensor=True,
+                convert_to_numpy=False,
                 show_progress_bar=False,
                 processing_kwargs={"video": {"do_sample_frames": False, "fps": None, "max_frames": None, "overflow_strategy": None, "add_timestamps": False, "max_soft_tokens": 140}},
             )
-            return normalized(result, rows=len(frames))
+            return normalized(result, rows=len(frames), device=self.device)
 
     def close(self):
         with self._lock:

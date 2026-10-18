@@ -3,7 +3,7 @@
 The `vanilla_rag` lmms-eval backend splits a video into nonoverlapping chunks,
 selects evidence, and sends the selected clips in chronological order to a base
 VLM for one answer. Recommended sampling parameter presets are included for
-`Qwen/Qwen3.5-9B` and `Qwen/Qwen3.8-27B`.
+`Qwen/Qwen3.5-4B`, `Qwen/Qwen3.5-9B`, and `Qwen/Qwen3.8-27B`.
 
 - **Dense:** embed chunks and the question with `google/embeddinggemma-2`, then
   select the top-k chunks by cosine similarity. Video embeddings are persisted.
@@ -50,7 +50,7 @@ Start the VLM on a GPU (like GPU 0) using [vllm_server.py](vllm_server.py).
 Keep this process running while evaluating in another terminal on the same node:
 
 ```bash
-# --model can also be set to Qwen/Qwen3.8-27B
+# --model can also be set to Qwen/Qwen3.5-4B or Qwen/Qwen3.8-27B
 CUDA_VISIBLE_DEVICES=0 .venv-vllm/bin/python \
   -m lmms_eval.models.chat.vanilla_rag.vllm_server \
   --model Qwen/Qwen3.5-9B \
@@ -74,7 +74,7 @@ both dense and uniform selection. The server's video limit must be at least
 Once the server is ready, run five examples with retrieval on another GPU (like GPU 1):
 
 ```bash
-# change model=Qwen/Qwen3.5-9B to model=Qwen/Qwen3.8-27B if used in the server
+# Set model to the same checkpoint used by the server.
 CUDA_VISIBLE_DEVICES=1 .venv-vanilla-rag/bin/python -m lmms_eval \
   --model vanilla_rag \
   --model_args 'model=Qwen/Qwen3.5-9B,base_url=http://127.0.0.1:8000/v1,api_key=EMPTY,rag_selection=dense,rag_embed_device=cuda:0,rag_trace_path=./results/retrieval.jsonl' \
@@ -89,7 +89,16 @@ exposes physical GPU 1. Use `rag_selection=uniform` for the uniform baseline,
 which does not load an embedder; alternatively, use `rag_embed_device=cpu` for
 dense retrieval on CPU. Both alternatives avoids the need for additional GPU, and 
 you can change the evaluator's prefix to `CUDA_VISIBLE_DEVICES=''` in those cases.
-Change the model name in both commands to use `Qwen/Qwen3.8-27B`.
+Change the model name in both commands to use `Qwen/Qwen3.5-4B` or
+`Qwen/Qwen3.8-27B`.
+
+For Qwen3.8-27B with a longer context on two H100 (80G) GPUs, the server can use
+`CUDA_VISIBLE_DEVICES=0,1`, `--tensor-parallel-size 2`, `--max-model-len 262144`,
+`--gpu-memory-utilization 0.75`, and `--max-num-seqs 1`. Keep the evaluator on
+`CUDA_VISIBLE_DEVICES=1` with `rag_embed_device=cuda:0` and `--batch_size 1`. This 
+shares GPU 1 with one VLM worker. Start the server and wait for readiness before 
+starting evaluation, so embedding allocations do not interfere with vLLM's startup 
+memory profiling.
 
 Configure the backend through comma-separated `--model_args` entries. These are
 the package defaults from [model.py](model.py):
