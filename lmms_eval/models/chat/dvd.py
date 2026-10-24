@@ -244,6 +244,7 @@ class DVDModel(AsyncOpenAIChat):
             dvd_host=dvd_host,
             dvd_port=int(dvd_port),
             enable_thinking=enable_thinking,
+            max_pixels=self.max_pixels,
         )
 
         os.makedirs(self.dvd_db_dir, exist_ok=True)
@@ -274,10 +275,11 @@ class DVDModel(AsyncOpenAIChat):
         doc = self.task_dict[task][split][doc_id]
         raw_messages = doc_to_messages(doc)
 
-        # Extract video path (from doc fields or message content)
+        # Task messages contain the resolved local path; document fields may
+        # contain only a dataset-relative filename (for example, LVBench).
         video_path = (
-            str(doc.get("video") or doc.get("video_path") or doc.get("videoPath") or "")
-            or _extract_video_path(raw_messages)
+            _extract_video_path(raw_messages)
+            or str(doc.get("video") or doc.get("video_path") or doc.get("videoPath") or "")
         )
         question = _extract_user_text(raw_messages)
 

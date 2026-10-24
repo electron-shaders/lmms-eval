@@ -22,6 +22,7 @@ metric_list:
   - metric: mlvu_percetion_score
     aggregation: !function utils.mlvu_aggregate_results_test
     higher_is_better: true
-
-
-
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nAnswer with only the option letter (A, B, C, D, E, or F)."
