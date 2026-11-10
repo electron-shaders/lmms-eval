@@ -1,7 +1,6 @@
 import datetime
 import json
 import os
-import random
 import re
 import sys
 import time
@@ -93,7 +92,8 @@ def get_multi_choice_info(doc):
 def parse_multi_choice_response(response, all_choices, index2ans):
     """
     Parse the prediction from the generated response.
-    Return the predicted index e.g., A, B, C, D.
+    Return the predicted index e.g., A, B, C, D, and whether parsing succeeded.
+    An unparseable response returns ("", False) and is scored as incorrect.
     https://github.com/MMMU-Benchmark/MMMU/blob/51ce7f3e829c16bb44bc5445782686b4c3508794/eval/eval_utils.py#L10
     """
     for char in [",", ".", "!", "?", ";", ":", "'"]:
@@ -124,8 +124,8 @@ def parse_multi_choice_response(response, all_choices, index2ans):
                 candidates.append(index)
                 index_ans = False  # it's content ans.
 
-    if len(candidates) == 0:  # still not get answer, randomly choose one.
-        pred_index = random.choice(all_choices)
+    if len(candidates) == 0:
+        pred_index = ""
     elif len(candidates) > 1:
         # candidates = list(set(candidates))
         start_indexes = []

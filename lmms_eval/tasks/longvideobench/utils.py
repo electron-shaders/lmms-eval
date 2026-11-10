@@ -1,6 +1,5 @@
 import json
 import os
-import random
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -188,7 +187,7 @@ def parse_multi_choice_response(response, all_choices, index2ans):
     """
     Changed from MMMU-style complex parsing into simple parsing.
     Fixed to avoid 'D. A book' be parsed as A.
-    Same as original LongVideoBench paper (from author Haoning Wu), if parsing failed, it will assign a random choice to model.
+    Return an empty prediction when parsing fails so it is scored as incorrect.
     """
     s = response.strip()
     answer_prefixes = [
@@ -205,11 +204,11 @@ def parse_multi_choice_response(response, all_choices, index2ans):
         s = s.replace(answer_prefix, "")
 
     if len(s.split()) > 10 and not re.search("[ABCDE]", s):
-        return random.choice(all_choices)
+        return ""
 
     matches = re.search(r"[ABCDE]", s)
     if matches is None:
-        return random.choice(all_choices)
+        return ""
     return matches[0]
 
 
